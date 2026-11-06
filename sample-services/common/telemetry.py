@@ -25,15 +25,17 @@ def setup_telemetry(app: FastAPI, service_name: str) -> trace.Tracer:
     resource = Resource.create(attributes={SERVICE_NAME: service_name})
     provider = TracerProvider(resource=resource)
 
-    # Configure OTLP gRPC exporter
-    otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
-    try:
-        exporter = OTLPSpanExporter(endpoint=otlp_endpoint, insecure=True)
-        processor = BatchSpanProcessor(exporter)
-        provider.add_span_processor(processor)
-    except Exception:
-        # Fallback to no-op processor in isolated test environments
-        pass
+    # Configure OTLP gRPC exporter unless disabled (e.g. in unit tests)
+    is_test = bool(os.getenv("PYTEST_CURRENT_TEST"))
+    is_disabled = os.getenv("OTEL_SDK_DISABLED", "").lower() == "true"
+    if not is_test and not is_disabled:
+        otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
+        try:
+            exporter = OTLPSpanExporter(endpoint=otlp_endpoint, insecure=True)
+            processor = BatchSpanProcessor(exporter)
+            provider.add_span_processor(processor)
+        except Exception:
+            pass
 
     trace.set_tracer_provider(provider)
 
