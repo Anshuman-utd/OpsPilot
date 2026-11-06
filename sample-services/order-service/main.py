@@ -149,7 +149,14 @@ def create_app() -> FastAPI:
             logger.error("Fault triggered: %s", error_msg)
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=error_msg)
 
-        # 2. Persist initial order in PENDING status
+        # 2. Fault Scenario: Database Pool Exhaustion
+        if fault_manager.is_active("db_pool_exhaustion"):
+            params = fault_manager.get_params("db_pool_exhaustion")
+            hold_sec = min(float(params.get("hold_seconds", 3.0)), 15.0)
+            logger.warning("Simulating db_pool_exhaustion: holding connection for %.1fs", hold_sec)
+            time.sleep(hold_sec)  # Synchronous hold blocking pool worker
+
+        # 3. Persist initial order in PENDING status
         order_id = str(uuid.uuid4())
         order = OrderModel(
             id=order_id,
