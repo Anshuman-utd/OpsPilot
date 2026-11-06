@@ -1,6 +1,9 @@
 name: opspilot
 
 services:
+  # ============================================================================
+  # Phase 1: Core Platform Backing Services
+  # ============================================================================
   postgres:
     image: postgres:16-alpine
     container_name: opspilot-postgres
@@ -40,11 +43,208 @@ services:
     networks:
       - opspilot-network
 
+  # ============================================================================
+  # Phase 2: Demo Application Database & Microservices
+  # ============================================================================
+  demo-postgres:
+    image: postgres:16-alpine
+    container_name: opspilot-demo-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DEMO_POSTGRES_USER:-demo_user}
+      POSTGRES_PASSWORD: ${DEMO_POSTGRES_PASSWORD:-demo_password}
+      POSTGRES_DB: ${DEMO_POSTGRES_DB:-demo_db}
+    ports:
+      - "${DEMO_POSTGRES_PORT:-5434}:5432"
+    volumes:
+      - demo_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DEMO_POSTGRES_USER:-demo_user} -d ${DEMO_POSTGRES_DB:-demo_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - opspilot-network
+
+  payment-service:
+    build:
+      context: ./sample-services
+      dockerfile: payment-service/Dockerfile
+    container_name: opspilot-payment-service
+    restart: unless-stopped
+    environment:
+      DEMO_DATABASE_URL: postgresql+asyncpg://demo_user:demo_password@demo-postgres:5432/demo_db
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      FAULT_INJECTION_ENABLED: ${FAULT_INJECTION_ENABLED:-false}
+    ports:
+      - "8003:8003"
+    depends_on:
+      demo-postgres:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    networks:
+      - opspilot-network
+
+  order-service:
+    build:
+      context: ./sample-services
+      dockerfile: order-service/Dockerfile
+    container_name: opspilot-order-service
+    restart: unless-stopped
+    environment:
+      DEMO_DATABASE_URL: postgresql+asyncpg://demo_user:demo_password@demo-postgres:5432/demo_db
+      PAYMENT_SERVICE_URL: http://payment-service:8003
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      FAULT_INJECTION_ENABLED: ${FAULT_INJECTION_ENABLED:-false}
+    ports:
+      - "8002:8002"
+    depends_on:
+      demo-postgres:
+        condition: service_healthy
+      payment-service:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+    networks:
+      - opspilot-network
+
+  api-gateway:
+    build:
+      context: ./sample-services
+      dockerfile: api-gateway/Dockerfile
+    container_name: opspilot-api-gateway
+    restart: unless-stopped
+    environment:
+      ORDER_SERVICE_URL: http://order-service:8002
+      PAYMENT_SERVICE_URL: http://payment-service:8003
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      FAULT_INJECTION_ENABLED: ${FAULT_INJECTION_ENABLED:-false}
+    ports:
+      - "8001:8001"
+    depends_on:
+      order-service:
+        condition: service_started
+      payment-service:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+    networks:
+      - opspilot-network
+
+  # ============================================================================
+  # Phase 2: Observability Stack (Prometheus, Grafana, Loki, Tempo, Collector)
+  # ============================================================================
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: opspilot-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    networks:
+      - opspilot-network
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: opspilot-grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infrastructure/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./infrastructure/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    networks:
+      - opspilot-network
+
+  loki:
+    image: grafana/loki:3.1.1
+    container_name: opspilot-loki
+    restart: unless-stopped
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./infrastructure/loki/loki-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - opspilot-network
+
+  tempo:
+    image: grafana/tempo:2.6.0
+    container_name: opspilot-tempo
+    restart: unless-stopped
+    ports:
+      - "3200:3200"
+    volumes:
+      - ./infrastructure/tempo/tempo-config.yaml:/etc/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    command: ["-config.file=/etc/tempo.yaml"]
+    networks:
+      - opspilot-network
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.109.0
+    container_name: opspilot-otel-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./infrastructure/otel-collector/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "13133:13133"
+    depends_on:
+      - tempo
+    networks:
+      - opspilot-network
+
+  alloy:
+    image: grafana/alloy:v1.3.1
+    container_name: opspilot-alloy
+    restart: unless-stopped
+    command: run --server.http.listen-addr=0.0.0.0:12345 /etc/alloy/config.alloy
+    volumes:
+      - ./infrastructure/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "12345:12345"
+    depends_on:
+      - loki
+    networks:
+      - opspilot-network
+
 volumes:
   postgres_data:
     name: opspilot_postgres_data
   redis_data:
     name: opspilot_redis_data
+  demo_postgres_data:
+    name: opspilot_demo_postgres_data
+  prometheus_data:
+    name: opspilot_prometheus_data
+  grafana_data:
+    name: opspilot_grafana_data
+  loki_data:
+    name: opspilot_loki_data
+  tempo_data:
+    name: opspilot_tempo_data
 
 networks:
   opspilot-network:

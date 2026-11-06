@@ -1,0 +1,26 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: "api-gateway"
+    static_configs:
+      - targets: ["api-gateway:8001"]
+        labels:
+          service: "api-gateway"
+
+  - job_name: "order-service"
+    static_configs:
+      - targets: ["order-service:8002"]
+        labels:
+          service: "order-service"
+
+  - job_name: "payment-service"
+    static_configs:
+      - targets: ["payment-service:8003"]
+        labels:
+          service: "payment-service"
+
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
