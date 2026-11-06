@@ -1,4 +1,5 @@
 import ApiStatusIndicator from "@/components/ApiStatusIndicator";
+import DemoServicesOverview from "@/components/DemoServicesOverview";
 
 export default function Home() {
   return (
@@ -55,11 +56,12 @@ export default function Home() {
         </div>
 
         {/* Live Backend & Infrastructure Status Indicator */}
-        <section className="space-y-3">
+        <section className="space-y-4">
           <h2 className="text-xs font-mono uppercase tracking-wider text-slate-400">
-            System Connectivity & Health Check
+            Platform Health & Core Infrastructure
           </h2>
           <ApiStatusIndicator />
+          <DemoServicesOverview />
         </section>
 
         {/* Project Roadmap & Architecture Stages */}
@@ -84,17 +86,18 @@ export default function Home() {
               </p>
             </div>
 
-            <div className="rounded-xl border border-slate-800 bg-slate-900/20 p-5 space-y-3 opacity-80">
+            <div className="rounded-xl border border-indigo-900/60 bg-slate-900/40 p-5 space-y-3 relative overflow-hidden">
+              <div className="absolute top-0 right-0 h-16 w-16 bg-indigo-500/10 rounded-bl-full pointer-events-none" />
               <div className="flex items-center justify-between">
-                <span className="text-xs font-mono font-semibold text-slate-400">Phase 2</span>
-                <span className="rounded bg-slate-800 px-2 py-0.5 text-[10px] font-mono text-slate-400">
-                  Planned
+                <span className="text-xs font-mono font-semibold text-indigo-400">Phase 2</span>
+                <span className="rounded bg-indigo-950 border border-indigo-700/60 px-2 py-0.5 text-[10px] font-mono text-indigo-300">
+                  Active
                 </span>
               </div>
-              <h3 className="font-semibold text-slate-200">Microservices & Telemetry</h3>
+              <h3 className="font-semibold text-white">Microservices & Telemetry</h3>
               <p className="text-xs text-slate-400 leading-relaxed">
-                Sample microservices (Gateway, Order, Payment) with OpenTelemetry, Prometheus
-                metrics, Loki logs, and Tempo traces.
+                Distributed demo microservices (Gateway, Order, Payment), Prometheus metrics, Loki
+                logs, Tempo traces, and controlled fault injection.
               </p>
             </div>
 
