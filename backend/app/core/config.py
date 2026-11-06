@@ -15,10 +15,10 @@ class Settings(BaseSettings):
     PORT: int = 8000
 
     # PostgreSQL async connection URL
-    DATABASE_URL: str = "postgresql+asyncpg://opspilot:opspilot_dev@localhost:5432/opspilot"
+    DATABASE_URL: str = "postgresql+asyncpg://opspilot:opspilot_dev@localhost:5433/opspilot"
 
     # Redis connection URL
-    REDIS_URL: str = "redis://localhost:6379/0"
+    REDIS_URL: str = "redis://localhost:6380/0"
 
     # LLM Settings (Future roadmap - not required to initialize in Phase 1)
     LLM_PROVIDER: str = "groq"
