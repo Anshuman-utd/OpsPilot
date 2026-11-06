@@ -26,21 +26,37 @@ Traditional monitoring and observability stacks (Prometheus, Grafana, Datadog) n
 
 OpsPilot maintains a strict boundary between **observed facts** and **AI-generated hypotheses**. The platform never takes unverified actions against production environments and enforces Human-in-the-Loop (HITL) approval for all remediation.
 
-### Architecture Workflow
+### Architecture Overview
 
 ```mermaid
 flowchart TD
-    subgraph Observability ["Telemetry & Observability (Phase 2)"]
-        APP["Target Applications"] --> METRICS["Prometheus (Metrics)"]
-        APP --> LOGS["Grafana Loki (Logs)"]
-        APP --> TRACES["Grafana Tempo (Traces)"]
+    subgraph Observability ["Telemetry & Observability Pipeline (Phase 2)"]
+        DEMO_APPS["Demo Microservices<br/>(Gateway :8001, Order :8002, Payment :8003)"]
+        DEMO_DB[("Demo PostgreSQL :5434")]
+        DEMO_APPS --> DEMO_DB
+        
+        COLLECTOR["OpenTelemetry Collector :4317/:4318"]
+        TEMPO["Grafana Tempo :3200 (Traces)"]
+        PROM["Prometheus :9090 (Metrics)"]
+        ALLOY["Grafana Alloy :12345"]
+        LOKI["Grafana Loki :3100 (Logs)"]
+        GRAFANA["Grafana Dashboards :3001"]
+
+        DEMO_APPS -.->|OTLP Traces| COLLECTOR
+        COLLECTOR --> TEMPO
+        PROM -.->|Scrape /metrics| DEMO_APPS
+        ALLOY -.->|Collect Logs| LOKI
+        GRAFANA --> PROM & LOKI & TEMPO
     end
 
     subgraph CoreEngine ["OpsPilot Core Platform (Phases 1, 3, 4)"]
-        DETECTION["Detection Engine / Celery Workers"] --> INCIDENT["Incident Management API"]
+        DETECTION["Detection Engine / Celery Workers"] --> INCIDENT["Incident Management API :8000"]
+        PLATFORM_DB[("Platform PostgreSQL :5433")]
+        PLATFORM_REDIS[("Platform Redis :6380")]
+        INCIDENT --> PLATFORM_DB & PLATFORM_REDIS
         INCIDENT --> GRAPH["LangGraph SRE Workflow"]
         
-        subgraph Agents ["Specialized AI Agents"]
+        subgraph Agents ["Specialized AI Agents (Phase 4)"]
             GRAPH --> MA["Metrics Agent"]
             GRAPH --> LA["Logs Agent"]
             GRAPH --> TA["Traces Agent"]
@@ -50,11 +66,11 @@ flowchart TD
         RCA --> REMEDIATION["Remediation Planner"]
     end
 
-    subgraph UserInterface ["Human-in-the-Loop (Phases 5 & 6)"]
+    subgraph UserInterface ["Human-in-the-Loop UI (Phases 5 & 6)"]
         REMEDIATION --> HITL{"Human Review & Approval"}
         HITL -- "Approved" --> RUNNER["Safe Sandbox Runner"]
         RUNNER --> VERIFY["Verification Agent"]
-        VERIFY --> DASHBOARD["Next.js Incident Dashboard"]
+        VERIFY --> DASHBOARD["Next.js Web UI :3000"]
         HITL -- "Rejected" --> DASHBOARD
     end
 ```
@@ -63,16 +79,23 @@ flowchart TD
 
 ## 3. Technology Stack
 
-### Backend
+### Backend & Microservices
 - **Language / Runtime:** Python 3.11+
 - **API Framework:** FastAPI
 - **Data Validation & Settings:** Pydantic v2 & Pydantic Settings
 - **ORM & Database Client:** SQLAlchemy 2.0 (asyncio) + `asyncpg`
 - **Database Migrations:** Alembic (async)
 - **Caching & Background Broker:** Redis (asyncio) & Celery
-- **HTTP Client:** HTTPX
+- **HTTP Client:** HTTPX (asynchronous with W3C trace propagation)
 - **Package & Environment Manager:** `uv`
 - **Testing & Quality:** `pytest`, `pytest-asyncio`, `ruff`
+
+### Observability & Telemetry (Phase 2)
+- **Distributed Tracing:** OpenTelemetry Python SDK & Grafana Tempo
+- **Metrics Collection:** Prometheus Client (`/metrics`) & Prometheus Server
+- **Structured Logging:** JSON stdout logger with trace/span ID correlation & Grafana Loki
+- **Telemetry Collector:** OpenTelemetry Collector Contrib & Grafana Alloy
+- **Visualization:** Grafana (pre-provisioned dashboards on host port `3001`)
 
 ### Frontend
 - **Framework:** Next.js 16 (App Router)
@@ -85,282 +108,194 @@ flowchart TD
 - **Abstractions:** LangChain
 - **LLM Provider:** Groq (initial, provider-agnostic architecture)
 
-### Infrastructure & Observability *(Phases 1, 2 & 7)*
-- **Containers:** Docker & Docker Compose
-- **Datastores:** PostgreSQL 16 (Alpine), Redis 7 (Alpine)
-- **Metrics, Logs & Traces:** Prometheus, Grafana Loki, Grafana Tempo, OpenTelemetry *(Phase 2)*
-- **Cloud Deployment:** AWS ECS/EKS *(Phase 7)*
-
 ---
 
 ## 4. Current Implementation Status & Roadmap
 
 | Phase | Milestone | Status | Key Deliverables |
 | :--- | :--- | :---: | :--- |
-| **Phase 1** | **Project Foundation & Development Environment** | **COMPLETE** | Monorepo structure, FastAPI async backend, Next.js frontend, Docker Compose (PostgreSQL 16 & Redis 7), Alembic async migrations, health probes, automated pytest suite. |
-| Phase 2 | Demo Microservices & Telemetry Instrumentation | *Planned* | Sample microservices (API Gateway, Order, Payment), OpenTelemetry, Prometheus, Loki, Tempo, synthetic fault injection. |
-| Phase 3 | Deterministic Incident Detection & Lifecycle Engine | *Planned* | Service registry, incident data models, threshold-based detection, Celery background monitoring. |
+| **Phase 1** | **Project Foundation & Environment** | **COMPLETE** | Monorepo structure, FastAPI async backend, Next.js frontend, Docker Compose (PostgreSQL 16 & Redis 7), Alembic migrations, health probes, automated pytest suite. |
+| **Phase 2** | **Demo Microservices & Observability** | **COMPLETE** | API Gateway (:8001), Order Service (:8002), Payment Service (:8003), Demo PostgreSQL (:5434), OpenTelemetry distributed tracing, Prometheus (:9090), Grafana (:3001), Loki (:3100), Tempo (:3200), Otel Collector, Grafana Alloy, 6 controlled fault scenarios. |
+| Phase 3 | Deterministic Incident Detection & Lifecycle Engine | *Planned* | Service registry, incident data models, threshold-based anomaly detection, Celery background monitoring. |
 | Phase 4 | LangGraph Multi-Agent Investigation & RCA Synthesis | *Planned* | Metrics, Logs, and Traces agents, LangGraph orchestration, evidence-backed RCA synthesis. |
 | Phase 5 | Remediation Planning, HITL Approval & Verification | *Planned* | Structured remediation plans, human-in-the-loop review, safe sandboxed execution, verification agent. |
 | Phase 6 | Next.js Incident Command Dashboard & Evaluation Suite | *Planned* | Incident timelines, agent execution graphs, post-mortem generation, synthetic evaluation benchmarks. |
 | Phase 7 | Cloud Production Deployment on AWS | *Planned* | Infrastructure as Code (Terraform), container orchestration, production CI/CD pipelines. |
 
-> *Note: AI agents, telemetry ingestion pipelines, and remediation executors are future roadmap phases. Phase 1 focuses exclusively on establishing a rock-solid, production-grade foundation.*
+> *Note: AI agents, incident detection engines, and remediation planners are future roadmap phases. Phase 2 focuses exclusively on building a realistic, observable distributed application.*
 
 ---
 
-## 5. Repository Structure
+## 5. Port Allocations & Service Catalog
 
-```text
-opspilot/
-├── backend/                       # FastAPI backend application
-│   ├── alembic/                   # Async database migrations
-│   │   ├── versions/              # Migration revision scripts (.gitkeep)
-│   │   ├── env.py                 # Async Alembic environment script
-│   │   └── script.py.mako         # Migration template
-│   ├── alembic.ini                # Alembic configuration
-│   ├── app/
-│   │   ├── api/                   # API routers and endpoints
-│   │   │   └── health.py          # Liveness and readiness endpoints
-│   │   ├── core/                  # Core infrastructure
-│   │   │   ├── config.py          # Centralized Pydantic settings
-│   │   │   ├── database.py        # Async SQLAlchemy engine & session factory
-│   │   │   ├── redis.py           # Async Redis client & pool
-│   │   │   └── celery_app.py      # Celery application initialization
-│   │   └── main.py                # FastAPI application entrypoint & lifespan
-│   ├── tests/                     # Automated pytest test suite
-│   │   ├── conftest.py            # Test fixtures (async HTTP client)
-│   │   ├── test_main.py           # App factory and root endpoint tests
-│   │   ├── test_health.py         # Liveness and readiness probe tests
-│   │   ├── test_database.py       # Database connection & session tests
-│   │   └── test_redis.py          # Redis client & ping tests
-│   ├── pyproject.toml             # Python dependencies and tool configuration
-│   ├── uv.lock                    # Deterministic package lockfile
-│   ├── .env.example               # Backend environment template
-│   └── README.md                  # Backend overview
-├── frontend/                      # Next.js frontend application
-│   ├── src/
-│   │   ├── app/
-│   │   │   ├── globals.css        # Tailwind CSS styles
-│   │   │   ├── layout.tsx         # Root HTML layout and metadata
-│   │   │   └── page.tsx           # OpsPilot landing & system overview
-│   │   └── components/
-│   │       └── ApiStatusIndicator.tsx # Client-side real-time health indicator
-│   ├── package.json               # Frontend dependencies & scripts
-│   ├── tsconfig.json              # TypeScript configuration with @/* alias
-│   ├── eslint.config.mjs          # ESLint configuration
-│   └── .env.example               # Frontend environment template
-├── docs/                          # Architecture & design documentation
-│   └── phase1-overview.md         # Phase 1 technical specification
-├── docker-compose.yml             # Local infrastructure (PostgreSQL 16, Redis 7)
-├── .gitignore                     # Monorepo gitignore rules
-└── README.md                      # Master project documentation
-```
+To prevent conflicts with existing local host services, OpsPilot maps all services to dedicated, non-conflicting host ports:
+
+| Service | Host Port | Container Port | Purpose |
+| :--- | :---: | :---: | :--- |
+| **OpsPilot Backend (Phase 1)** | `8000` | `8000` | Core Platform Management API |
+| **OpsPilot Frontend (Phase 1)** | `3000` | `3000` | Platform Web UI |
+| **OpsPilot PostgreSQL (Phase 1)** | `5433` | `5432` | Core Platform Database |
+| **OpsPilot Redis (Phase 1)** | `6380` | `6379` | Platform Redis Cache / Celery Broker |
+| **Demo PostgreSQL (Phase 2)** | `5434` | `5432` | Demo Application Database |
+| **API Gateway (Phase 2)** | `8001` | `8001` | Microservices Ingress Gateway |
+| **Order Service (Phase 2)** | `8002` | `8002` | Order Processing Microservice |
+| **Payment Service (Phase 2)** | `8003` | `8003` | Payment Processing Microservice |
+| **Prometheus (Phase 2)** | `9090` | `9090` | Time-Series Metrics Scraper & TSDB |
+| **Grafana (Phase 2)** | `3001` | `3000` | Observability Dashboards (:3001 avoids :3000 UI) |
+| **Grafana Loki (Phase 2)** | `3100` | `3100` | Centralized Log Aggregation Engine |
+| **Grafana Tempo (Phase 2)** | `3200` | `3200` | Distributed Trace Storage & Query |
+| **OTel Collector (Phase 2)** | `4317` / `4318` | `4317` / `4318` | OpenTelemetry gRPC / HTTP Ingestion |
+| **Grafana Alloy (Phase 2)** | `12345` | `12345` | Log Collector Daemon & UI |
 
 ---
 
-## 6. Prerequisites
+## 6. Local Development Setup
 
-Ensure you have the following tools installed:
-- **Python**: `>= 3.11` (Python 3.11.x recommended)
-- **uv**: Modern, fast Python package manager (`brew install uv` or `curl -LsSf https://astral.sh/uv/install.sh | sh`)
-- **Node.js**: `>= 18.18.0` (Node 20+ or 22 LTS recommended) and `npm`
-- **Docker & Docker Compose**: Docker Desktop or Docker Engine
+### Step 1: Start All Infrastructure (Docker Compose)
 
----
-
-## 7. Local Development Setup
-
-Follow these steps to set up and run OpsPilot locally:
-
-### Step 1: Start Backing Services (Docker Compose)
-
-Start PostgreSQL 16 and Redis 7 in detached mode:
+Start all containers in detached mode:
 
 ```bash
 docker-compose up -d
 ```
 
-Verify that both containers are running and healthy:
+Verify that all 11 services are running and healthy:
 ```bash
 docker-compose ps
 ```
 
-To stop backing services:
-```bash
-docker-compose down
-```
+### Step 2: Access Observability Dashboards
 
-### Step 2: Backend Setup & Launch
+- **Grafana Dashboards:** [http://localhost:3001](http://localhost:3001) (User: `admin` / Password: `admin`)
+  - Pre-provisioned with Prometheus, Loki, and Tempo data sources.
+  - Pre-built operational dashboard: **OpsPilot Microservices Overview**.
+  - Clicking on any `trace_id` in Loki logs jumps directly to the Tempo trace waterfall!
+- **Prometheus UI:** [http://localhost:9090](http://localhost:9090)
+  - Inspect targets under `Status -> Targets` (Gateway, Order, Payment services).
+- **OpenTelemetry Collector Health:** [http://localhost:13133](http://localhost:13133)
 
-```bash
-cd backend
-
-# 1. Create virtual environment and install all dependencies (including dev)
-uv sync --extra dev
-
-# 2. Create local environment configuration
-cp .env.example .env
-
-# 3. Apply database migrations
-uv run alembic upgrade head
-
-# 4. Start the FastAPI development server
-uv run uvicorn app.main:app --reload --port 8000
-```
-
-The backend API will be available at:
-- **Interactive OpenAPI Docs (Swagger):** [http://localhost:8000/docs](http://localhost:8000/docs)
-- **Alternative API Docs (ReDoc):** [http://localhost:8000/redoc](http://localhost:8000/redoc)
-- **Root Metadata:** [http://localhost:8000/](http://localhost:8000/)
-- **Liveness Probe:** [http://localhost:8000/health/live](http://localhost:8000/health/live)
-- **Readiness Probe:** [http://localhost:8000/health/ready](http://localhost:8000/health/ready)
-
-### Step 3: Frontend Setup & Launch
-
-In a separate terminal window:
+### Step 3: Start Frontend Web UI
 
 ```bash
 cd frontend
-
-# 1. Install dependencies
 npm install
-
-# 2. Create local environment configuration
-cp .env.example .env.local
-
-# 3. Start Next.js development server
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) in your browser. The landing dashboard will connect to the backend and display live infrastructure status.
+Open [http://localhost:3000](http://localhost:3000). The dashboard displays live statuses for both the core platform and the Phase 2 demo microservices.
 
----
+### Step 4: Run Pipeline Verification CLI
 
-## 8. Health & Readiness API Endpoints
+OpsPilot includes a verification script that exercises the full end-to-end request flow:
 
-OpsPilot implements Kubernetes-compliant health probes:
-
-| Endpoint | Method | Purpose | Typical Response |
-| :--- | :---: | :--- | :--- |
-| `/` | `GET` | Service metadata, status, and API documentation links | `200 OK` |
-| `/health` | `GET` | Basic process health check | `200 OK` |
-| `/health/live` | `GET` | Kubernetes liveness probe | `200 OK` |
-| `/health/ready` | `GET` | Backing dependency verification (PostgreSQL & Redis) | `200 OK` (All healthy) / `503 Service Unavailable` (Degraded) |
-
-#### Sample Readiness Response (200 OK)
-```json
-{
-  "status": "ready",
-  "timestamp": "2026-11-01T18:05:00.000000Z",
-  "components": {
-    "database": {
-      "status": "healthy",
-      "details": { "latency_ms": 1.15 }
-    },
-    "redis": {
-      "status": "healthy",
-      "details": { "latency_ms": 0.42 }
-    }
-  }
-}
+```bash
+cd sample-services
+uv run python verify_pipeline.py
 ```
 
 ---
 
-## 9. Automated Testing & Code Quality
+## 7. Controlled Fault Injection Guide
 
-### Backend Automated Tests
-OpsPilot includes a deterministic pytest suite with mocked async database and Redis fixtures:
+OpsPilot provides 6 controllable, safe, and reversible fault scenarios to simulate production failures and observe resulting telemetry.
 
+Fault injection is disabled by default (`FAULT_INJECTION_ENABLED=false`). To enable locally:
 ```bash
+export FAULT_INJECTION_ENABLED=true
+```
+
+### 1. Payment Failure Spike
+Simulates a sudden spike in payment declines (80% failure rate):
+```bash
+curl -X POST http://localhost:8003/debug/faults/payment_failure_spike/enable \
+  -H "Content-Type: application/json" \
+  -d '{"duration_seconds": 120, "params": {"failure_rate": 0.8, "reason": "BANK_DECLINED"}}'
+```
+
+### 2. Downstream Latency Spike
+Injects artificial latency into payment processing:
+```bash
+curl -X POST http://localhost:8003/debug/faults/downstream_latency_spike/enable \
+  -H "Content-Type: application/json" \
+  -d '{"duration_seconds": 120, "params": {"delay_seconds": 2.5}}'
+```
+
+### 3. Payment Service Unavailability
+Simulates payment service outage returning HTTP 503 without killing containers:
+```bash
+curl -X POST http://localhost:8003/debug/faults/payment_service_unavailability/enable \
+  -H "Content-Type: application/json" \
+  -d '{"duration_seconds": 60, "params": {"status_code": 503, "error_message": "Payment service down"}}'
+```
+
+### 4. Database Connection Pool Exhaustion
+Simulates connection pool starvation on Order Service:
+```bash
+curl -X POST http://localhost:8002/debug/faults/db_pool_exhaustion/enable \
+  -H "Content-Type: application/json" \
+  -d '{"duration_seconds": 60, "params": {"hold_seconds": 5.0}}'
+```
+
+### 5. Cascading Timeout Failure
+Payment delay exceeds Order Service 3.0s timeout, causing cascading 504 Gateway Timeouts:
+```bash
+curl -X POST http://localhost:8003/debug/faults/cascading_timeout/enable \
+  -H "Content-Type: application/json" \
+  -d '{"duration_seconds": 120, "params": {"delay_seconds": 5.0}}'
+```
+
+### 6. Order Service Error Spike
+Simulates internal order pipeline exceptions returning HTTP 500:
+```bash
+curl -X POST http://localhost:8002/debug/faults/order_service_error_spike/enable \
+  -H "Content-Type: application/json" \
+  -d '{"duration_seconds": 60, "params": {"error_rate": 0.7}}'
+```
+
+### Reset All Faults
+```bash
+curl -X POST http://localhost:8001/debug/faults/reset
+curl -X POST http://localhost:8002/debug/faults/reset
+curl -X POST http://localhost:8003/debug/faults/reset
+```
+
+---
+
+## 8. Automated Testing & Code Quality
+
+### Backend & Microservices Tests
+```bash
+# Run Core Platform Backend tests (17 tests)
 cd backend
+uv run pytest -v
+
+# Run Demo Microservices & Telemetry tests (27 tests)
+cd ../sample-services
 uv run pytest -v
 ```
 
-### Backend Linting & Formatting
-Enforced using Ruff (PEP 8, PyUpgrade, Bugbear, Flake8-Import-Conventions):
-
+### Code Formatting & Linting
 ```bash
-cd backend
-uv run ruff check .
-uv run ruff format --check .
-```
+# Backend lint
+cd backend && uv run ruff check . && uv run ruff format --check .
 
-To auto-format:
-```bash
-uv run ruff format .
-```
+# Sample services lint
+cd ../sample-services && uv run ruff check . && uv run ruff format --check .
 
-### Frontend Linting & Build Verification
-```bash
-cd frontend
-npm run lint
-npm run build
+# Frontend lint
+cd ../frontend && npm run lint && npm run build
 ```
 
 ---
 
-## 10. Environment Variables Reference
+## 9. Security Considerations
 
-### Backend (`backend/.env.example`)
-
-| Variable | Default | Description |
-| :--- | :--- | :--- |
-| `APP_NAME` | `OpsPilot` | Name of the application |
-| `APP_ENV` | `development` | Deployment environment (`development`, `staging`, `production`) |
-| `DEBUG` | `true` | Enable debug logging and verbose exceptions |
-| `HOST` | `0.0.0.0` | Bind host for Uvicorn |
-| `PORT` | `8000` | Bind port for Uvicorn |
-| `DATABASE_URL` | `postgresql+asyncpg://opspilot:opspilot_dev@localhost:5432/opspilot` | PostgreSQL async connection string |
-| `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL |
-| `LLM_PROVIDER` | `groq` | Initial LLM provider *(Phase 4)* |
-| `LLM_MODEL` | `llama-3.3-70b-versatile` | Target LLM model *(Phase 4)* |
-| `GROQ_API_KEY` | `""` | API key for Groq *(Optional in Phase 1)* |
-
-### Frontend (`frontend/.env.example`)
-
-| Variable | Default | Description |
-| :--- | :--- | :--- |
-| `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | Backend API base URL |
-| `NEXT_PUBLIC_APP_NAME` | `OpsPilot` | Application title display |
-| `NEXT_PUBLIC_APP_ENV` | `development` | Environment mode display |
+- **No Committed Secrets:** Credentials and tokens are stored exclusively in `.env` / `.env.local` files, strictly ignored in git.
+- **Dedicated Port Mapping:** Non-conflicting ports (`5433`, `5434`, `6380`, `3001`, `8001`-`8003`) prevent interference with host services.
+- **Safe Fault Controls:** Fault injection endpoints are disabled by default and bounded by maximum TTL windows to prevent accidental production impact.
 
 ---
 
-## 11. Troubleshooting Guide
-
-### 1. Database Connection Refused
-- **Symptom:** `/health/ready` returns `503` with `"database": {"status": "unhealthy"}`.
-- **Fix:** Ensure Docker Compose is running: `docker-compose up -d`. Check logs with `docker-compose logs postgres`. Verify port `5432` is not occupied by another local PostgreSQL service.
-
-### 2. Redis Connection Refused
-- **Symptom:** `/health/ready` returns `503` with `"redis": {"status": "unhealthy"}`.
-- **Fix:** Ensure Redis container is running: `docker-compose ps`. Test Redis directly with `docker exec -it opspilot-redis redis-cli ping`.
-
-### 3. Port Conflicts
-- If port `8000` (FastAPI) or `3000` (Next.js) is already in use:
-  - Start FastAPI on another port: `uv run uvicorn app.main:app --port 8080`
-  - Update `NEXT_PUBLIC_API_URL` in `frontend/.env.local` to match the new port.
-
-### 4. uv Dependency Resolution
-- If virtual environment needs a clean rebuild:
-  ```bash
-  cd backend
-  rm -rf .venv
-  uv sync --extra dev
-  ```
-
----
-
-## 12. Security Considerations
-
-- **Zero Committed Secrets:** All credential strings and secret keys are stored in uncommitted `.env` / `.env.local` files, strictly ignored in git.
-- **Frontend / Backend Boundary:** LLM keys and infrastructure secrets never reach the browser or client-side code.
-- **Sanitized Health Probes:** Error messages in production environments can be masked to prevent information leakage while maintaining observability.
-
----
-
-## 13. License
+## 10. License
 
 OpsPilot is developed as an open-source portfolio project under the MIT License.
