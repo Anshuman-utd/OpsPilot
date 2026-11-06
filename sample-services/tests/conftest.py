@@ -1,4 +1,4 @@
 import os
 
-# Disable background OTLP network exporter during automated pytest runs
-os.environ["OTEL_SDK_DISABLED"] = "true"
+# Disable network trace exports during tests while keeping in-memory span tracing active
+os.environ["OTEL_TRACES_EXPORTER"] = "none"
