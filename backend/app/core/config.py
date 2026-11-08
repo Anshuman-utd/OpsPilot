@@ -20,7 +20,34 @@ class Settings(BaseSettings):
     # Redis connection URL
     REDIS_URL: str = "redis://localhost:6380/0"
 
-    # LLM Settings (Future roadmap - not required to initialize in Phase 1)
+    # Observability Integration Settings
+    PROMETHEUS_URL: str = "http://localhost:9090"
+    PROMETHEUS_TIMEOUT_SECONDS: float = 5.0
+    GRAFANA_URL: str = "http://localhost:3001"
+    TEMPO_URL: str = "http://localhost:3200"
+    LOKI_URL: str = "http://localhost:3100"
+
+    # Deterministic Incident Detection Settings
+    INCIDENT_DETECTION_ENABLED: bool = True
+    INCIDENT_EVALUATION_INTERVAL_SECONDS: int = 30
+
+    # Threshold configurations for initial rules
+    HTTP_5XX_HIGH_THRESHOLD: float = 0.05
+    HTTP_5XX_CRITICAL_THRESHOLD: float = 0.20
+    P95_LATENCY_HIGH_SECONDS: float = 1.0
+    P95_LATENCY_CRITICAL_SECONDS: float = 3.0
+    PAYMENT_FAILURE_HIGH_THRESHOLD: float = 20.0
+    PAYMENT_FAILURE_CRITICAL_THRESHOLD: float = 50.0
+    ORDER_FAILURE_HIGH_THRESHOLD: float = 20.0
+    ORDER_FAILURE_CRITICAL_THRESHOLD: float = 50.0
+    DB_POOL_HIGH_THRESHOLD: float = 75.0
+    DB_POOL_CRITICAL_THRESHOLD: float = 90.0
+
+    # Minimum sample gates to prevent false alerts on low traffic
+    MIN_TRAFFIC_REQUESTS: int = 5
+    MIN_PAYMENT_SAMPLES: int = 5
+
+    # LLM Settings (Phase 4 roadmap)
     LLM_PROVIDER: str = "groq"
     LLM_MODEL: str | None = "llama-3.3-70b-versatile"
     GROQ_API_KEY: str | None = None
