@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.health import router as health_router
+from app.api.incidents import router as incidents_router
 from app.core.config import get_settings
 
 
@@ -62,6 +63,7 @@ def create_application() -> FastAPI:
 
     # Register API routers
     application.include_router(health_router)
+    application.include_router(incidents_router)
 
     @application.get(
         "/",
