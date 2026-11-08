@@ -13,6 +13,7 @@ from app.models.incident import (
     IncidentEventModel,
     IncidentEventType,
     IncidentModel,
+    IncidentSeverity,
     IncidentStatus,
 )
 from app.schemas.detection import DetectionRuleResponse, DetectionRunResponse
@@ -45,20 +46,37 @@ async def list_incidents(
     """Retrieve filtered, paginated list of incidents."""
     query = select(IncidentModel)
 
+    valid_statuses = {s.value for s in IncidentStatus}
     if status_filter:
         if status_filter.lower() == "active":
             query = query.where(
-                IncidentModel.status.in_([
-                    IncidentStatus.OPEN.value,
-                    IncidentStatus.ACKNOWLEDGED.value,
-                    IncidentStatus.INVESTIGATING.value,
-                ])
+                IncidentModel.status.in_(
+                    [
+                        IncidentStatus.OPEN.value,
+                        IncidentStatus.ACKNOWLEDGED.value,
+                        IncidentStatus.INVESTIGATING.value,
+                    ]
+                )
             )
-        else:
+        elif status_filter.upper() in valid_statuses:
             query = query.where(IncidentModel.status == status_filter.upper())
+        else:
+            allowed = ", ".join(sorted(valid_statuses))
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid status '{status_filter}'. Allowed: active, {allowed}",
+            )
 
+    valid_severities = {s.value for s in IncidentSeverity}
     if severity:
-        query = query.where(IncidentModel.severity == severity.upper())
+        if severity.upper() in valid_severities:
+            query = query.where(IncidentModel.severity == severity.upper())
+        else:
+            allowed_sev = ", ".join(sorted(valid_severities))
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid severity '{severity}'. Allowed: {allowed_sev}",
+            )
 
     if service:
         query = query.where(IncidentModel.service_name == service.lower())
@@ -67,7 +85,16 @@ async def list_incidents(
         query = query.where(IncidentModel.incident_type == incident_type)
 
     # Sorting
-    sort_column = getattr(IncidentModel, sort_by, IncidentModel.created_at)
+    allowed_sort_fields = {
+        "created_at",
+        "updated_at",
+        "last_seen_at",
+        "severity",
+        "status",
+        "occurrence_count",
+    }
+    sort_field = sort_by if sort_by in allowed_sort_fields else "created_at"
+    sort_column = getattr(IncidentModel, sort_field, IncidentModel.created_at)
     if order.lower() == "asc":
         query = query.order_by(sort_column.asc())
     else:
@@ -107,9 +134,7 @@ async def get_detection_rules() -> list[DetectionRuleResponse]:
         elif r.rule_id == "payment_failure_spike":
             high_t = settings.PAYMENT_FAILURE_HIGH_THRESHOLD
             crit_t = settings.PAYMENT_FAILURE_CRITICAL_THRESHOLD
-            query_str = (
-                '100 * sum(increase(payments_processed_total{status="FAILED"}[5m])) / total'
-            )
+            query_str = '100 * sum(increase(payments_processed_total{status="FAILED"}[5m])) / total'
         elif r.rule_id == "service_unavailable":
             high_t = 0.0
             crit_t = 0.0

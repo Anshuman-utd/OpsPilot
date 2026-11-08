@@ -101,14 +101,15 @@ The platform continuously evaluates 6 deterministic SRE rules against Prometheus
 1. **`high_http_5xx_rate`**: Server 5xx error percentage exceeds threshold (`>5%` High, `>20%` Critical).
 2. **`high_p95_latency`**: 95th percentile request latency exceeds SLA (`>1.0s` High, `>3.0s` Critical).
 3. **`payment_failure_spike`**: Percentage of failed payment transactions exceeds threshold (`>20%` High, `>50%` Critical).
-4. **`service_unavailable`**: Service scrape target unreachable (`up == 0`).
+4. **`service_unavailable`**: Service scrape target unreachable (`up == 0`) or missing entirely from discovery.
 5. **`db_pool_exhaustion`**: Active database checked-out connections exceed pool capacity (`>75%` High, `>90%` Critical).
 6. **`high_order_failure_rate`**: Percentage of failed orders exceeds threshold (`>20%` High, `>50%` Critical).
 
 ### Automated Deduplication & Lifecycle
 - Every breach calculates a stable fingerprint: $\text{SHA256}(\text{rule\_id} + ":" + \text{service})[0:32]$.
 - Active incidents are updated in place with incremented occurrence counts and refreshed evidence rather than creating duplicate alerts.
-- When metrics recover, incidents are automatically resolved.
+- **Resolved Incident Recurrence (Option B):** When a resolved incident breaches again, a new active incident is created while preserving historical post-mortems, enforced via a database partial unique index.
+- **Safe Auto-Recovery:** Incidents only resolve when minimum traffic gates are satisfied; protected by configurable flapping dampening (`CONSECUTIVE_HEALTHY_CYCLES_FOR_RECOVERY`).
 - Full state machine: `OPEN` $\to$ `ACKNOWLEDGED` $\to$ `INVESTIGATING` $\to$ `RESOLVED`.
 
 ---

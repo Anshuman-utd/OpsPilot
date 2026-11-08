@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
@@ -50,9 +50,7 @@ class IncidentModel(Base):
 
     __tablename__ = "incidents"
 
-    id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
-    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     service_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
@@ -66,7 +64,8 @@ class IncidentModel(Base):
     source: Mapped[str] = mapped_column(String(50), nullable=False, default="detection_engine")
 
     # Deduplication fingerprint: stable hash of (rule_id, service_name, entity)
-    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    # Uniqueness enforced among active incidents via uq_active_incident_fingerprint index
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
 
     triggered_value: Mapped[float | None] = mapped_column(Float, nullable=True)
     threshold_value: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -106,6 +105,13 @@ class IncidentModel(Base):
     __table_args__ = (
         Index("ix_incidents_status_severity", "status", "severity"),
         Index("ix_incidents_service_status", "service_name", "status"),
+        Index(
+            "uq_active_incident_fingerprint",
+            "fingerprint",
+            unique=True,
+            postgresql_where=text("status != 'RESOLVED'"),
+            sqlite_where=text("status != 'RESOLVED'"),
+        ),
     )
 
 
@@ -114,9 +120,7 @@ class IncidentEventModel(Base):
 
     __tablename__ = "incident_events"
 
-    id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
-    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     incident_id: Mapped[str] = mapped_column(
         String(36),
         ForeignKey("incidents.id", ondelete="CASCADE"),

@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -106,10 +107,13 @@ class HighHttp5xxErrorRateRule(BaseDetectionRule):
                 continue
 
             rate_ratio = sample.value
+            if math.isnan(rate_ratio) or math.isinf(rate_ratio) or rate_ratio < 0:
+                continue
+
             total_req_rate = volume_map.get(svc, 0.0)
             fingerprint = self.generate_fingerprint(svc)
 
-            if total_req_rate < 0.05:
+            if total_req_rate < 0.05 or math.isnan(total_req_rate):
                 continue
 
             observed_pct = round(rate_ratio * 100, 2)
@@ -213,6 +217,9 @@ class HighP95LatencyRule(BaseDetectionRule):
                 continue
 
             p95_sec = sample.value
+            if math.isnan(p95_sec) or math.isinf(p95_sec) or p95_sec < 0:
+                continue
+
             fingerprint = self.generate_fingerprint(svc)
 
             if p95_sec >= crit_t:
@@ -306,10 +313,15 @@ class PaymentFailureSpikeRule(BaseDetectionRule):
             return [], []
 
         total_samples = sample_result.samples[0].value if sample_result.samples else 0.0
-        if total_samples < settings.MIN_PAYMENT_SAMPLES:
-            return [], [fingerprint]
-
         failure_pct = ratio_result.samples[0].value
+
+        if math.isnan(failure_pct) or math.isnan(total_samples):
+            return [], []
+
+        # Safe auto-resolution: If sample count is below minimum traffic guard,
+        # we neither trigger a breach nor mark as healthy.
+        if total_samples < settings.MIN_PAYMENT_SAMPLES:
+            return [], []
         crit_t = settings.PAYMENT_FAILURE_CRITICAL_THRESHOLD
         high_t = settings.PAYMENT_FAILURE_HIGH_THRESHOLD
 
@@ -371,15 +383,22 @@ class PaymentFailureSpikeRule(BaseDetectionRule):
 
 
 class ServiceUnavailableRule(BaseDetectionRule):
-    """Detects when an application service scrape target is unreachable (up == 0)."""
+    """Detects when an application scrape target is unreachable (up == 0) or missing."""
 
-    def __init__(self, enabled: bool = True) -> None:
+    DEFAULT_EXPECTED_SERVICES = ("api-gateway", "order-service", "payment-service")
+
+    def __init__(
+        self,
+        enabled: bool = True,
+        expected_services: tuple[str, ...] | None = None,
+    ) -> None:
         super().__init__(
             rule_id="service_unavailable",
             name="Service Unavailable (Uptime Probe)",
-            description="Service endpoint unreachable by Prometheus scrape targets",
+            description="Service endpoint unreachable by Prometheus or missing from discovery",
             enabled=enabled,
         )
+        self.expected_services = expected_services or self.DEFAULT_EXPECTED_SERVICES
 
     async def evaluate(
         self, client: PrometheusClient, settings: Settings
@@ -390,16 +409,21 @@ class ServiceUnavailableRule(BaseDetectionRule):
         query = 'up{job=~"api-gateway|order-service|payment-service"}'
         result = await client.query_instant(query)
         if not result.success:
+            logger.warning(
+                "Prometheus unreachable or query failed during ServiceUnavailableRule evaluation"
+            )
             return [], []
 
         breaches: list[RuleBreach] = []
         healthy_fingerprints: list[str] = []
+        discovered_services: set[str] = set()
 
         for sample in result.samples:
             svc = sample.labels.get("service") or sample.labels.get("job")
             if not svc:
                 continue
 
+            discovered_services.add(svc)
             is_up = sample.value == 1.0
             fingerprint = self.generate_fingerprint(svc)
 
@@ -428,6 +452,35 @@ class ServiceUnavailableRule(BaseDetectionRule):
                 )
             else:
                 healthy_fingerprints.append(fingerprint)
+
+        # Flag expected services that completely disappeared from Prometheus discovery
+        for expected_svc in self.expected_services:
+            if expected_svc not in discovered_services:
+                fp = self.generate_fingerprint(expected_svc)
+                breaches.append(
+                    RuleBreach(
+                        rule_id=self.rule_id,
+                        rule_name=self.name,
+                        service_name=expected_svc,
+                        severity=IncidentSeverity.CRITICAL,
+                        observed_value=0.0,
+                        threshold_value=1.0,
+                        title=f"Service missing: {expected_svc} not found in Prometheus",
+                        description=(
+                            f"Expected target '{expected_svc}' is missing entirely from Prometheus "
+                            "scrape targets or service discovery."
+                        ),
+                        incident_type="service_missing",
+                        fingerprint=fp,
+                        evidence={
+                            "rule_id": self.rule_id,
+                            "promql": query,
+                            "status": "TARGET_MISSING",
+                            "expected_service": expected_svc,
+                            "discovered_services": sorted(discovered_services),
+                        },
+                    )
+                )
 
         return breaches, healthy_fingerprints
 
@@ -469,6 +522,9 @@ class DbPoolExhaustionRule(BaseDetectionRule):
                 continue
 
             pct = sample.value
+            if math.isnan(pct) or math.isinf(pct) or pct < 0:
+                continue
+
             fingerprint = self.generate_fingerprint(svc)
 
             if pct >= crit_t:
@@ -560,10 +616,15 @@ class HighOrderFailureRateRule(BaseDetectionRule):
             return [], []
 
         total_orders = sample_result.samples[0].value if sample_result.samples else 0.0
-        if total_orders < settings.MIN_TRAFFIC_REQUESTS:
-            return [], [fingerprint]
-
         failure_pct = ratio_result.samples[0].value
+
+        if math.isnan(failure_pct) or math.isnan(total_orders):
+            return [], []
+
+        # Safe auto-resolution: If total orders in window is below minimum,
+        # we neither trigger a breach nor mark as healthy.
+        if total_orders < settings.MIN_TRAFFIC_REQUESTS:
+            return [], []
         crit_t = settings.ORDER_FAILURE_CRITICAL_THRESHOLD
         high_t = settings.ORDER_FAILURE_HIGH_THRESHOLD
 

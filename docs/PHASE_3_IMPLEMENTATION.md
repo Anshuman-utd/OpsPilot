@@ -27,11 +27,11 @@ OpsPilot implements six pre-configured SRE detection rules. All thresholds and e
 | Rule ID | Monitored Metric & PromQL Query | Default Thresholds | Severity | Minimum Sample Guard |
 |:---|:---|:---:|:---:|:---|
 | `high_http_5xx_rate` | `sum by (service) (rate(http_requests_total{status_code=~"5.."}[5m])) / clamp_min(sum by (service) (rate(http_requests_total[5m])), 0.001)` | `> 5%` (High)<br>`> 20%` (Critical) | HIGH / CRITICAL | Min `0.05` req/s |
-| `high_p95_latency` | `histogram_quantile(0.95, sum by (le, service) (rate(http_request_duration_seconds_bucket[5m])))` | `> 1.0s` (High)<br>`> 3.0s` (Critical) | HIGH / CRITICAL | Valid histogram buckets |
-| `payment_failure_spike` | `100 * sum(increase(payments_processed_total{status="FAILED"}[5m])) / clamp_min(sum(increase(payments_processed_total[5m])), 1)` | `> 20%` (High)<br>`> 50%` (Critical) | HIGH / CRITICAL | Min 5 payment attempts |
-| `service_unavailable` | `up{job=~"api-gateway\|order-service\|payment-service"}` | `== 0` | CRITICAL | Instant scrape target |
-| `db_pool_exhaustion` | `100 * (sum by (service) (db_pool_checked_out) / clamp_min(sum by (service) (db_pool_size), 1))` | `> 75%` (High)<br>`> 90%` (Critical) | HIGH / CRITICAL | Connection pool gauge |
-| `high_order_failure_rate` | `100 * sum(increase(orders_created_total{status="PAYMENT_FAILED"}[5m])) / clamp_min(sum(increase(orders_created_total[5m])), 1)` | `> 20%` (High)<br>`> 50%` (Critical) | HIGH / CRITICAL | Min 5 orders in window |
+| `high_p95_latency` | `histogram_quantile(0.95, sum by (le, service) (rate(http_request_duration_seconds_bucket[5m])))` | `> 1.0s` (High)<br>`> 3.0s` (Critical) | HIGH / CRITICAL | Valid histogram buckets (NaN/Inf guarded) |
+| `payment_failure_spike` | `100 * sum(increase(payments_processed_total{status="FAILED"}[5m])) / clamp_min(sum(increase(payments_processed_total[5m])), 1)` | `> 20%` (High)<br>`> 50%` (Critical) | HIGH / CRITICAL | Min 5 payment attempts (no auto-resolve if below) |
+| `service_unavailable` | `up{job=~"api-gateway\|order-service\|payment-service"}` | `== 0` or missing target | CRITICAL | Probe down & missing target discovery |
+| `db_pool_exhaustion` | `100 * (sum by (service) (db_pool_checked_out) / clamp_min(sum by (service) (db_pool_size), 1))` | `> 75%` (High)<br>`> 90%` (Critical) | HIGH / CRITICAL | Connection pool gauge (NaN/Inf guarded) |
+| `high_order_failure_rate` | `100 * sum(increase(orders_created_total{status="PAYMENT_FAILED"}[5m])) / clamp_min(sum(increase(orders_created_total[5m])), 1)` | `> 20%` (High)<br>`> 50%` (Critical) | HIGH / CRITICAL | Min 5 orders in window (no auto-resolve if below) |
 
 ---
 
@@ -79,19 +79,34 @@ erDiagram
 
 ---
 
-## 4. Deduplication & Lifecycle State Machine
+## 4. Deduplication, Recurrence Policy & Safe Auto-Recovery
 
-### 4.1 Stable Fingerprinting
+### 4.1 Stable Fingerprinting & Recurrence Policy (Option B)
 To prevent repeated alerts from creating duplicate incident rows:
 $$\text{fingerprint} = \text{SHA256}(\text{rule\_id} + ":" + \text{service\_name})[0:32]$$
 - Changing metric values, timestamps, or transient labels are **never** included in the fingerprint.
-- If an active incident (`OPEN`, `ACKNOWLEDGED`, `INVESTIGATING`) already exists with the same fingerprint:
+- **Active Incident Deduplication:** If an active incident (`OPEN`, `ACKNOWLEDGED`, `INVESTIGATING`) exists with the same fingerprint:
   1. `occurrence_count` is incremented.
   2. `last_seen_at` is updated to UTC now.
   3. `triggered_value` and `evidence` are updated with the latest telemetry.
   4. If severity escalated (e.g. `HIGH` $\to$ `CRITICAL`), `severity` is upgraded and an escalation event recorded.
   5. An `INCIDENT_UPDATED` event is added to the chronological audit trail.
   6. **No duplicate row is created.**
+- **Resolved Incident Recurrence (Option B):**
+  When a previously `RESOLVED` incident breaches again:
+  - A brand new `IncidentModel` is created with status `OPEN` and `occurrence_count = 1`.
+  - The resolved incident remains historical and immutable.
+  - Enforced at the database level via a partial unique index:
+    `CREATE UNIQUE INDEX uq_active_incident_fingerprint ON incidents (fingerprint) WHERE status != 'RESOLVED'`
+  - Managed by Alembic migration `002_partial_unique_index_on_active_fingerprint.py`.
+
+### 4.2 Safe Auto-Recovery & Flapping Dampening
+- Incidents are **only** auto-resolved when the rule affirmatively proves the metric has recovered under valid sample volume.
+- Incidents are **never** resolved when:
+  - Prometheus is down, timed out, or returns `success=False`.
+  - Sample volume is below the minimum traffic gate (`MIN_PAYMENT_SAMPLES`, `MIN_TRAFFIC_REQUESTS`).
+  - Metrics return `NaN` or `Inf`.
+- **Hysteresis / Flapping Dampening:** Configurable via `CONSECUTIVE_HEALTHY_CYCLES_FOR_RECOVERY` (default `1`). Requires $N$ consecutive healthy evaluation passes before transitioning an incident to `RESOLVED`. Any intermittent breach resets the counter.
 
 ### 4.2 State Machine Transitions
 
@@ -215,29 +230,32 @@ The complete test suite runs in under 3 seconds across both backend and sample s
 
 ```text
 ============================== backend test suite ==============================
-tests/test_celery_detection.py ..                                        [  5%]
-tests/test_config.py ...                                                 [ 12%]
-tests/test_database.py ..                                                [ 17%]
+tests/test_celery_detection.py ..                                        [  3%]
+tests/test_concurrency.py ....                                           [ 11%]
+tests/test_database.py .....                                             [ 21%]
 tests/test_deduplication.py ....                                         [ 28%]
-tests/test_detection_engine.py .........                                 [ 51%]
-tests/test_e2e_detection_flow.py .                                       [ 53%]
-tests/test_health.py ...                                                 [ 61%]
-tests/test_incident_lifecycle.py ..                                      [ 66%]
-tests/test_incidents_api.py ....                                         [ 76%]
-tests/test_main.py ..                                                    [ 82%]
-tests/test_redis.py ...                                                  [ 89%]
-tests/test_schemas.py ....                                               [100%]
-============================== 39 passed in 0.32s ==============================
+tests/test_detection_engine.py ...........                               [ 50%]
+tests/test_e2e_detection_flow.py .                                       [ 51%]
+tests/test_health.py ......                                              [ 63%]
+tests/test_incident_lifecycle.py ..                                      [ 67%]
+tests/test_incidents_api.py ....                                         [ 75%]
+tests/test_main.py ..                                                    [ 78%]
+tests/test_missing_targets.py ...                                        [ 84%]
+tests/test_recurrence.py .                                               [ 86%]
+tests/test_redis.py ....                                                 [ 94%]
+tests/test_safe_recovery.py ...                                          [100%]
+============================== 52 passed in 0.46s ==============================
 
 =========================== sample-services test suite =========================
-tests/test_api_gateway.py .....                                          [ 18%]
-tests/test_fault_injection.py ......                                     [ 40%]
-tests/test_integration_flow.py ...                                       [ 51%]
-tests/test_order_service.py .....                                        [ 70%]
+tests/test_api_gateway.py ......                                         [ 22%]
+tests/test_fault_injection.py .....                                      [ 40%]
+tests/test_integration_flow.py ..                                        [ 48%]
+tests/test_order_service.py ......                                       [ 70%]
 tests/test_payment_service.py .....                                      [ 88%]
 tests/test_telemetry.py ...                                              [100%]
-============================== 27 passed in 1.68s ==============================
+============================== 27 passed in 1.63s ==============================
 ```
 
-- **Ruff Linting:** Zero warnings, 100% compliant with standard rules.
+- **Total Test Count:** **79 passed**, 0 failed, 0 skipped.
+- **Ruff Linting:** Zero warnings, 100% compliant across backend and sample services.
 - **Frontend Build:** `npm run lint` and `npm run build` compiled cleanly.

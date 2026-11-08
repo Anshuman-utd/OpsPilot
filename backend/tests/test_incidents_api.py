@@ -43,47 +43,49 @@ class TestIncidentsApi:
         # Seed 3 distinct incidents
         now = datetime.now(UTC)
         async with session_factory() as session:
-            session.add_all([
-                IncidentModel(
-                    id="inc-1",
-                    title="Order Service Error Spike",
-                    service_name="order-service",
-                    severity=IncidentSeverity.CRITICAL.value,
-                    status=IncidentStatus.OPEN.value,
-                    incident_type="http_5xx_rate",
-                    fingerprint="fp-api-1",
-                    triggered_at=now,
-                    last_seen_at=now,
-                    created_at=now,
-                    updated_at=now,
-                ),
-                IncidentModel(
-                    id="inc-2",
-                    title="Payment Service Latency Spike",
-                    service_name="payment-service",
-                    severity=IncidentSeverity.HIGH.value,
-                    status=IncidentStatus.ACKNOWLEDGED.value,
-                    incident_type="p95_latency",
-                    fingerprint="fp-api-2",
-                    triggered_at=now,
-                    last_seen_at=now,
-                    created_at=now,
-                    updated_at=now,
-                ),
-                IncidentModel(
-                    id="inc-3",
-                    title="Old Gateway Downtime",
-                    service_name="api-gateway",
-                    severity=IncidentSeverity.MEDIUM.value,
-                    status=IncidentStatus.RESOLVED.value,
-                    incident_type="service_unavailable",
-                    fingerprint="fp-api-3",
-                    triggered_at=now,
-                    last_seen_at=now,
-                    created_at=now,
-                    updated_at=now,
-                ),
-            ])
+            session.add_all(
+                [
+                    IncidentModel(
+                        id="inc-1",
+                        title="Order Service Error Spike",
+                        service_name="order-service",
+                        severity=IncidentSeverity.CRITICAL.value,
+                        status=IncidentStatus.OPEN.value,
+                        incident_type="http_5xx_rate",
+                        fingerprint="fp-api-1",
+                        triggered_at=now,
+                        last_seen_at=now,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                    IncidentModel(
+                        id="inc-2",
+                        title="Payment Service Latency Spike",
+                        service_name="payment-service",
+                        severity=IncidentSeverity.HIGH.value,
+                        status=IncidentStatus.ACKNOWLEDGED.value,
+                        incident_type="p95_latency",
+                        fingerprint="fp-api-2",
+                        triggered_at=now,
+                        last_seen_at=now,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                    IncidentModel(
+                        id="inc-3",
+                        title="Old Gateway Downtime",
+                        service_name="api-gateway",
+                        severity=IncidentSeverity.MEDIUM.value,
+                        status=IncidentStatus.RESOLVED.value,
+                        incident_type="service_unavailable",
+                        fingerprint="fp-api-3",
+                        triggered_at=now,
+                        last_seen_at=now,
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                ]
+            )
             await session.commit()
 
         # 1. List all
@@ -108,6 +110,16 @@ class TestIncidentsApi:
         assert resp_svc.status_code == 200
         assert len(resp_svc.json()) == 1
         assert resp_svc.json()[0]["id"] == "inc-2"
+
+        # 5. Invalid status filter returns 400 Bad Request
+        resp_bad_st = await client.get("/api/v1/incidents?status=INVALID_STATUS")
+        assert resp_bad_st.status_code == 400
+        assert "Invalid status" in resp_bad_st.json()["detail"]
+
+        # 6. Invalid severity filter returns 400 Bad Request
+        resp_bad_sev = await client.get("/api/v1/incidents?severity=ULTRA_CRITICAL")
+        assert resp_bad_sev.status_code == 400
+        assert "Invalid severity" in resp_bad_sev.json()["detail"]
 
     @pytest.mark.asyncio
     async def test_get_incident_detail_and_404(self, client_with_sqlite):

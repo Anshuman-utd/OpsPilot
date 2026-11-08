@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     MIN_TRAFFIC_REQUESTS: int = 5
     MIN_PAYMENT_SAMPLES: int = 5
 
+    # Safe auto-recovery: consecutive healthy cycles required to resolve (flapping prevention)
+    CONSECUTIVE_HEALTHY_CYCLES_FOR_RECOVERY: int = 1
+
     # LLM Settings (Phase 4 roadmap)
     LLM_PROVIDER: str = "groq"
     LLM_MODEL: str | None = "llama-3.3-70b-versatile"

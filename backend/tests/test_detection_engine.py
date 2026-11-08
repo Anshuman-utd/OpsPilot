@@ -13,6 +13,7 @@ from app.services.detection.rules import (
     HighP95LatencyRule,
     PaymentFailureSpikeRule,
     ServiceUnavailableRule,
+    get_default_rules,
 )
 from app.services.prometheus import PrometheusClient, PrometheusQueryResult, PrometheusSample
 
@@ -169,6 +170,7 @@ class TestDetectionRules:
             query="up",
             samples=[
                 PrometheusSample(labels={"service": "api-gateway"}, value=1.0),
+                PrometheusSample(labels={"service": "order-service"}, value=1.0),
                 PrometheusSample(labels={"service": "payment-service"}, value=0.0),
             ],
         )
@@ -177,8 +179,30 @@ class TestDetectionRules:
         assert len(breaches) == 1
         assert breaches[0].service_name == "payment-service"
         assert breaches[0].severity == IncidentSeverity.CRITICAL
-        assert len(healthy_fps) == 1
+        assert len(healthy_fps) == 2
 
+    @pytest.mark.asyncio
+    async def test_service_missing_target_rule(self, mock_prometheus, test_settings):
+        """Test when an expected target completely disappears from Prometheus discovery."""
+        rule = ServiceUnavailableRule(
+            expected_services=("api-gateway", "order-service", "payment-service")
+        )
+        # Only api-gateway is returned by Prometheus discovery
+        mock_prometheus.query_instant.return_value = PrometheusQueryResult(
+            success=True,
+            query="up",
+            samples=[
+                PrometheusSample(labels={"service": "api-gateway"}, value=1.0),
+            ],
+        )
+
+        breaches, healthy_fps = await rule.evaluate(mock_prometheus, test_settings)
+        # order-service and payment-service are missing targets!
+        assert len(breaches) == 2
+        missing_svcs = {b.service_name for b in breaches}
+        assert missing_svcs == {"order-service", "payment-service"}
+        assert all(b.incident_type == "service_missing" for b in breaches)
+        assert len(healthy_fps) == 1
 
     @pytest.mark.asyncio
     async def test_order_failure_rule(self, mock_prometheus, test_settings):
@@ -207,17 +231,36 @@ class TestDetectionEngineResilience:
     """Tests resilience against Prometheus errors, empty sets, and network outages."""
 
     @pytest.mark.asyncio
-    async def test_empty_prometheus_response_does_not_create_incident(
+    async def test_metric_rules_empty_response_does_not_create_incident(
         self, sqlite_session, mock_prometheus, test_settings
     ):
+        """Metric ratio/histogram rules with empty samples do not alert."""
+        rules = [r for r in get_default_rules() if not isinstance(r, ServiceUnavailableRule)]
         mock_prometheus.query_instant.return_value = PrometheusQueryResult(
             success=True, query="test", samples=[]
         )
-        engine = DetectionEngine(prometheus_client=mock_prometheus)
+        engine = DetectionEngine(rules=rules, prometheus_client=mock_prometheus)
 
         res = await engine.evaluate_all(sqlite_session, settings=test_settings)
         assert res.breaches_detected == 0
         assert res.incidents_created == 0
+
+    @pytest.mark.asyncio
+    async def test_empty_discovery_creates_missing_service_incidents(
+        self, sqlite_session, mock_prometheus, test_settings
+    ):
+        """When Prometheus targets disappear, ServiceUnavailableRule flags them as missing."""
+        mock_prometheus.query_instant.return_value = PrometheusQueryResult(
+            success=True, query="up", samples=[]
+        )
+        engine = DetectionEngine(
+            rules=[ServiceUnavailableRule()],
+            prometheus_client=mock_prometheus,
+        )
+
+        res = await engine.evaluate_all(sqlite_session, settings=test_settings)
+        assert res.breaches_detected == 3
+        assert res.incidents_created == 3
 
     @pytest.mark.asyncio
     async def test_prometheus_timeout_does_not_create_or_resolve_incidents(
