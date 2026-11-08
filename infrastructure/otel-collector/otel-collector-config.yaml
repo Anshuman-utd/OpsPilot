@@ -9,6 +9,7 @@ receivers:
 processors:
   batch:
     timeout: 1s
+    send_batch_size: 512
     send_batch_max_size: 1000
 
 exporters:
