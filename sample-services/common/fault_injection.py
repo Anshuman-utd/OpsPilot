@@ -169,11 +169,13 @@ def create_fault_router() -> APIRouter:
 
     @router.post("", response_model=FaultInfo)
     async def configure_fault(payload: dict[str, Any]) -> FaultInfo:
-        """Configure and toggle a fault by payload (supports both enabled=True and enabled=False)."""
+        """Configure and toggle a fault by payload (supports both enabled=True and False)."""
         verify_enabled()
         fault_name = payload.get("fault_type") or payload.get("name")
         if not fault_name:
-            raise HTTPException(status_code=400, detail="Missing fault_type or name in request payload")
+            raise HTTPException(
+                status_code=400, detail="Missing fault_type or name in request payload"
+            )
         enabled = payload.get("enabled", True)
         if enabled:
             duration = int(payload.get("duration_seconds", 120))
