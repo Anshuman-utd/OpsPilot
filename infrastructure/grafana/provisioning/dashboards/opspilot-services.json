@@ -28,7 +28,7 @@
           "legendFormat": "{{service}}"
         }
       ],
-      "title": "Request Rate (req/s)",
+      "title": "HTTP Request Rate (req/s)",
       "type": "timeseries"
     },
     {
@@ -72,8 +72,8 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "ops" } },
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 9 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 9 },
       "id": 6,
       "targets": [
         {
@@ -81,13 +81,27 @@
           "legendFormat": "Orders {{status}}"
         }
       ],
-      "title": "Orders Created per Minute",
+      "title": "Orders Created Rate (req/s)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 9 },
+      "id": 8,
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(payments_processed_total[1m]))",
+          "legendFormat": "Payments {{status}}"
+        }
+      ],
+      "title": "Payment Transactions Rate (req/s)",
       "type": "timeseries"
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": { "defaults": { "unit": "short" } },
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 9 },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 9 },
       "id": 7,
       "targets": [
         {
@@ -96,6 +110,45 @@
         }
       ],
       "title": "Payment Failures (5m Trend)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 },
+      "id": 9,
+      "title": "Resource & Connection Saturation",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "percent" }
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 17 },
+      "id": 10,
+      "targets": [
+        {
+          "expr": "100 * (sum by (service) (db_pool_checked_out) / clamp_min(sum by (service) (db_pool_size), 1))",
+          "legendFormat": "{{service}} Pool Saturation"
+        }
+      ],
+      "title": "Database Connection Pool Saturation (%)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 17 },
+      "id": 11,
+      "targets": [
+        {
+          "expr": "sum by (service, target, status_code) (rate(downstream_requests_total[1m]))",
+          "legendFormat": "{{service}} -> {{target}} [{{status_code}}]"
+        }
+      ],
+      "title": "Downstream RPC Call Rate",
       "type": "timeseries"
     }
   ],

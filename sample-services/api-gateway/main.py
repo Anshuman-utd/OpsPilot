@@ -49,7 +49,19 @@ async def forward_order_creation(payload: dict) -> OrderResponse:
             ).observe(duration)
 
             if resp.status_code == 201:
-                return OrderResponse(**resp.json())
+                order_data = resp.json()
+                logger.info(
+                    "Order created successfully: order_id=%s, status=%s",
+                    order_data.get("id"),
+                    order_data.get("status"),
+                    extra={
+                        "extra_fields": {
+                            "order_id": order_data.get("id"),
+                            "status": order_data.get("status"),
+                        }
+                    },
+                )
+                return OrderResponse(**order_data)
 
             # Translate downstream error
             error_detail = (
@@ -175,11 +187,18 @@ def create_app() -> FastAPI:
         status_code=status.HTTP_201_CREATED,
         tags=["Orders"],
     )
+    @app.post(
+        "/api/v1/orders",
+        response_model=OrderResponse,
+        status_code=status.HTTP_201_CREATED,
+        include_in_schema=False,
+    )
     async def create_order(request: OrderCreateRequest) -> OrderResponse:
         """Route order creation to the Order Service."""
         return await forward_order_creation(request.model_dump())
 
     @app.get("/api/orders/{order_id}", response_model=OrderResponse, tags=["Orders"])
+    @app.get("/api/v1/orders/{order_id}", response_model=OrderResponse, include_in_schema=False)
     async def get_order(order_id: str) -> OrderResponse:
         """Route order lookup to the Order Service."""
         order_url = f"{ORDER_SERVICE_URL.rstrip('/')}/orders/{order_id}"

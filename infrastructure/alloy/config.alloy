@@ -22,23 +22,23 @@ discovery.relabel "service_logs" {
 loki.source.docker "docker_logs" {
   host       = "unix:///var/run/docker.sock"
   targets    = discovery.relabel.service_logs.output
-  forward_to = [loki.process.add_trace_labels.receiver]
+  forward_to = [loki.process.parse_structured_logs.receiver]
 }
 
-loki.process "add_trace_labels" {
+loki.process "parse_structured_logs" {
   stage.json {
     expressions = {
-      level    = "level",
-      trace_id = "trace_id",
-      service  = "service",
+      level   = "level",
+      service = "service",
     }
   }
 
+  // Keep stream labels low-cardinality to prevent Loki stream explosion.
+  // trace_id is extracted directly from the JSON log line by Grafana derivedFields.
   stage.labels {
     values = {
-      level    = "level",
-      trace_id = "trace_id",
-      service  = "service",
+      level   = "level",
+      service = "service",
     }
   }
 

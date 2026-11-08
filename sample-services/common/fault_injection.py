@@ -167,6 +167,27 @@ def create_fault_router() -> APIRouter:
         verify_enabled()
         return fault_manager.list_all()
 
+    @router.post("", response_model=FaultInfo)
+    async def configure_fault(payload: dict[str, Any]) -> FaultInfo:
+        """Configure and toggle a fault by payload (supports both enabled=True and enabled=False)."""
+        verify_enabled()
+        fault_name = payload.get("fault_type") or payload.get("name")
+        if not fault_name:
+            raise HTTPException(status_code=400, detail="Missing fault_type or name in request payload")
+        enabled = payload.get("enabled", True)
+        if enabled:
+            duration = int(payload.get("duration_seconds", 120))
+            params = payload.get("parameters") or payload.get("params") or {}
+            try:
+                return fault_manager.enable(fault_name, duration, params)
+            except KeyError as err:
+                raise HTTPException(status_code=404, detail=str(err)) from err
+        else:
+            try:
+                return fault_manager.disable(fault_name)
+            except KeyError as err:
+                raise HTTPException(status_code=404, detail=str(err)) from err
+
     @router.post("/{fault_name}/enable", response_model=FaultInfo)
     async def enable_fault(fault_name: str, request: FaultEnableRequest) -> FaultInfo:
         """Enable a specific fault scenario with optional parameters and TTL."""
