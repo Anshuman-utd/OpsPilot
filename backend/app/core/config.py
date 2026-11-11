@@ -50,10 +50,32 @@ class Settings(BaseSettings):
     # Safe auto-recovery: consecutive healthy cycles required to resolve (flapping prevention)
     CONSECUTIVE_HEALTHY_CYCLES_FOR_RECOVERY: int = 1
 
-    # LLM Settings (Phase 4 roadmap)
+    # LLM Settings (Phase 4 Agentic Investigation)
     LLM_PROVIDER: str = "groq"
-    LLM_MODEL: str | None = "llama-3.3-70b-versatile"
+    LLM_MODEL: str = "llama-3.3-70b-versatile"
     GROQ_API_KEY: str | None = None
+    LLM_TEMPERATURE: float = 0.0
+    LLM_TIMEOUT_SECONDS: float = 45.0
+    LLM_MAX_RETRIES: int = 2
+
+    # Autonomous Investigation Settings (Single-pass deterministic LangGraph pipeline)
+    INVESTIGATION_ENABLED: bool = True
+    AUTO_INVESTIGATION_ENABLED: bool = False
+    INVESTIGATION_MAX_CONCURRENT: int = 3
+
+    # Phase 5: Controlled Remediation & Recovery Settings
+    REMEDIATION_ENABLED: bool = True
+    REMEDIATION_APPROVAL_EXPIRY_MINUTES: int = 30
+    REMEDIATION_EXECUTION_TIMEOUT_SECONDS: float = 30.0
+    REMEDIATION_VERIFICATION_INTERVAL_SECONDS: int = 5
+    REMEDIATION_VERIFICATION_TIMEOUT_SECONDS: int = 120
+    REMEDIATION_CONSECUTIVE_HEALTHY_REQUIRED: int = 3
+    REMEDIATION_MAX_CONCURRENT_EXECUTIONS: int = 2
+
+    # Target Microservice Endpoints (Demo Environment)
+    ORDER_SERVICE_URL: str = "http://localhost:8002"
+    PAYMENT_SERVICE_URL: str = "http://localhost:8003"
+    API_GATEWAY_URL: str = "http://localhost:8001"
 
     model_config = SettingsConfigDict(
         env_file=".env",

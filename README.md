@@ -30,7 +30,8 @@ OpsPilot maintains a strict boundary between **observed facts** and **AI-generat
 - **Phase 1 (Foundation):** Completed & Verified.
 - **Phase 2 (Microservices & Observability):** Completed & Audited.
 - **Phase 3 (Incident Management & Deterministic Detection):** Completed & Verified.
-- **Phase 4 (LangGraph AI Agents & Root Cause Analysis):** Up next.
+- **Phase 4 (LangGraph AI Agents & Root Cause Analysis):** Completed & Benchmark Validated.
+- **Phase 5 (Human-Approved Remediation & Recovery Verification):** Completed & Verified (152 total tests passing).
 
 ```mermaid
 flowchart TD
@@ -40,7 +41,7 @@ flowchart TD
         OS & PS --> DEMO_DB[("Demo PostgreSQL :5434")]
     end
 
-    subgraph Observability ["Observability Pipeline (Audited in Phase 2/3)"]
+    subgraph Observability ["Observability Pipeline (Phase 2)"]
         GW & OS & PS -.->|OTLP Traces| OTEL["OTel Collector :4317"]
         OTEL --> TEMPO["Grafana Tempo :3200"]
         PROM["Prometheus :9090"] -.->|Scrape 5s| GW & OS & PS
@@ -58,9 +59,36 @@ flowchart TD
         INCIDENT --> PLATFORM_DB & PLATFORM_REDIS
     end
 
+    subgraph InvestigationSwarm ["Autonomous Investigation Swarm (Phase 4 LangGraph)"]
+        CELERY -->|Async Task| WORKFLOW["LangGraph Multi-Agent Workflow"]
+        WORKFLOW --> ANALYZER["Incident Analyzer"]
+        ANALYZER --> METRICS_AG["Metrics Investigator (Prometheus)"]
+        ANALYZER --> LOG_AG["Log Investigator (Loki)"]
+        ANALYZER --> TRACE_AG["Trace Investigator (Tempo)"]
+        ANALYZER --> HIST_AG["Historical Context (PostgreSQL)"]
+        METRICS_AG & LOG_AG & TRACE_AG & HIST_AG --> AGGREGATOR["Evidence Aggregator"]
+        AGGREGATOR --> RCA_SYNTH["RCA Synthesizer (Groq / Heuristic)"]
+        RCA_SYNTH --> VALIDATOR["Evidence Validator & Calibrator"]
+        VALIDATOR --> FINAL_REPORT["Verified Final RCA Report"]
+    end
+
+    subgraph RemediationEngine ["Controlled Remediation & Recovery Engine (Phase 5)"]
+        FINAL_REPORT --> PLANNER["Remediation Planner (LLM + Fallback)"]
+        PLANNER --> REGISTRY["Allowlisted Action Registry"]
+        REGISTRY --> POLICY["Deterministic Safety Policy (12 Rules)"]
+        POLICY --> APPROVAL_GATE["Mandatory Human Approval Gate"]
+        APPROVAL_GATE -->|Approved & Signed| EXEC_TASK["Celery Execution Worker"]
+        EXEC_TASK -->|Redis Lock + Bounded HTTP| OS & PS & GW
+        EXEC_TASK --> VERIF_TASK["Celery Verification Worker"]
+        VERIF_TASK -->|Query Consecutive Cycles| PROM
+        VERIF_TASK -->|3 Cycles Healthy| RESOLVED_INC["Auto-Resolve Incident & Audit Trail"]
+    end
+
     subgraph UserInterface ["Modern SRE Dashboard :3000"]
         INCIDENT --> DASHBOARD["Next.js Incident Dashboard"]
-        DASHBOARD -->|Acknowledge / Investigate / Resolve| INCIDENT
+        DASHBOARD -->|Start Investigation / View RCA| WORKFLOW
+        DASHBOARD -->|Propose Plan & Approve Action| RemediationEngine
+        DASHBOARD -->|Acknowledge / Resolve| INCIDENT
         DASHBOARD -->|Trigger Manual Evaluation| DETECTION
     end
 ```
@@ -135,6 +163,24 @@ The platform continuously evaluates 6 deterministic SRE rules against Prometheus
 
 ---
 
+## 5. Autonomous Multi-Agent Investigation & RCA (Phase 4)
+
+When an incident triggers or an operator requests investigation, OpsPilot dispatches an autonomous multi-agent swarm orchestrated by **LangGraph**:
+
+1. **Incident Analyzer**: Bounds time windows ($t - 15m$ to $t + 5m$) and formulates targeted investigation goals.
+2. **Metrics Investigator**: Queries Prometheus golden signals (throughput, latency, error rate, DB pool saturation).
+3. **Log Investigator**: Queries Loki error logs, extracts distributed trace IDs (`trace_id`), and identifies exceptions.
+4. **Trace Investigator**: Queries Tempo traces, isolates root vs child spans, and identifies bottleneck spans and HTTP 5xx errors.
+5. **Historical Context**: Correlates past incidents on PostgreSQL and identifies recurring deterministic fingerprints.
+6. **Evidence Aggregator**: Merges empirical telemetry into verified `observed_facts` and `evidence_references` (`EV-...`).
+7. **RCA Synthesizer**: Formulates evidence-backed causal hypotheses using Groq (`llama-3.3-70b-versatile`) or deterministic heuristic fallback.
+8. **Evidence Validator**: Verifies citation referential integrity, detects contradictions, checks service attribution and window bounds, and calibrates heuristic confidence (`HIGH`, `MEDIUM`, `LOW`).
+
+### Strictly READ-ONLY Guarantee
+Agents exclusively inspect telemetry and generate hypotheses. Zero operational mutations, shell executions, container restarts, or database writes outside investigation persistence are permitted.
+
+---
+
 ## 6. Quick Start & Operations
 
 ### Step 1: Start All Infrastructure (Docker Compose)
@@ -148,10 +194,15 @@ cd backend
 uv run alembic upgrade head
 ```
 
-### Step 3: Start Backend API
+### Step 3: Start Backend API & Celery Worker
 ```bash
+# Terminal 1: FastAPI API
 cd backend
 uv run uvicorn app.main:app --reload --port 8000
+
+# Terminal 2: Celery Worker
+cd backend
+uv run celery -A app.core.celery_app worker -l info -B
 ```
 Interactive API documentation is accessible at [http://localhost:8000/docs](http://localhost:8000/docs).
 
@@ -162,19 +213,36 @@ npm run dev
 ```
 Open [http://localhost:3000](http://localhost:3000) for the Incidents Dashboard.
 
-### Step 5: Trigger Manual Incident Detection Pass
+### Step 5: Start Autonomous Investigation
 ```bash
-curl -X POST http://localhost:8000/api/v1/incidents/evaluate | jq .
+# Start investigation via REST API
+curl -X POST http://localhost:8000/api/v1/incidents/{incident_id}/investigations \
+  -H "Content-Type: application/json" \
+  -d '{"trigger_type": "manual"}' | jq .
 ```
+Or click **"Start Autonomous Investigation"** in the Next.js incident drawer.
+
+### Step 6: Propose & Authorize Controlled Remediation
+```bash
+# Propose an evidence-backed remediation plan
+curl -X POST http://localhost:8000/api/v1/incidents/{incident_id}/remediation-plans \
+  -H "Content-Type: application/json" | jq .
+
+# Approve a specific allowlisted action (Mandatory Human Operator Gate)
+curl -X POST http://localhost:8000/api/v1/remediation-plans/{plan_id}/actions/{action_id}/approve \
+  -H "Content-Type: application/json" \
+  -d '{"approver_id": "operator@sre", "comment": "Approved following RCA review", "plan_version": 1}' | jq .
+```
+Or use the **"Remediation & Recovery"** panel in the Next.js incident drawer to review proposed actions, approve execution with confirmation, and track real-time recovery verification.
 
 ---
 
 ## 7. Automated Testing & Code Quality
 
-OpsPilot features 66 passing unit and integration tests across the platform:
+OpsPilot features **152 passing unit, integration, and end-to-end tests** with 100% test pass rate across the full stack:
 
 ```bash
-# Run Core Platform & Incident Engine tests (39 tests)
+# Run Core Platform, Detection, LangGraph Investigation, & Phase 5 Remediation tests (125 tests)
 cd backend
 uv run pytest -v
 
@@ -191,8 +259,23 @@ cd ../frontend && npm run lint && npm run build
 
 ## 8. Documentation Index
 
+### Phase 1–3 Foundations
 - **Observability Audit Report:** [`docs/OBSERVABILITY_AUDIT.md`](docs/OBSERVABILITY_AUDIT.md)
 - **Phase 3 Implementation Guide:** [`docs/PHASE_3_IMPLEMENTATION.md`](docs/PHASE_3_IMPLEMENTATION.md)
+
+### Phase 4 Multi-Agent Investigation
+- **Phase 4 Architecture Specification:** [`docs/PHASE_4_ARCHITECTURE.md`](docs/PHASE_4_ARCHITECTURE.md)
+- **Phase 4 Implementation Guide:** [`docs/PHASE_4_IMPLEMENTATION.md`](docs/PHASE_4_IMPLEMENTATION.md)
+- **Phase 4 Evaluation & Benchmark Report:** [`docs/PHASE_4_EVALUATION.md`](docs/PHASE_4_EVALUATION.md)
+- **Phase 4 Independent Audit Report:** [`docs/PHASE_4_AUDIT_REPORT.md`](docs/PHASE_4_AUDIT_REPORT.md)
+- **Phase 4 Remediation & Reliability Report:** [`docs/PHASE_4_REMEDIATION_REPORT.md`](docs/PHASE_4_REMEDIATION_REPORT.md)
+
+### Phase 5 Controlled Remediation & Verified Recovery
+- **Phase 5 Architecture Specification:** [`docs/PHASE_5_ARCHITECTURE.md`](docs/PHASE_5_ARCHITECTURE.md)
+- **Phase 5 Implementation Guide:** [`docs/PHASE_5_IMPLEMENTATION.md`](docs/PHASE_5_IMPLEMENTATION.md)
+- **Phase 5 Security Architecture & Policy Invariants:** [`docs/PHASE_5_SECURITY.md`](docs/PHASE_5_SECURITY.md)
+- **Phase 5 Evaluation & Scenario Report:** [`docs/PHASE_5_EVALUATION.md`](docs/PHASE_5_EVALUATION.md)
+- **Phase 5 Formal Completion Report:** [`docs/PHASE_5_COMPLETION_REPORT.md`](docs/PHASE_5_COMPLETION_REPORT.md)
 
 ---
 

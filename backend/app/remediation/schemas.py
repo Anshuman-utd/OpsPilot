@@ -1,0 +1,215 @@
+"""Pydantic schemas for Phase 5 Remediation API and planning."""
+
+from datetime import datetime
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.remediation.models import (
+    RiskLevel,
+)
+
+# =========================================================================
+# Remediation Action Schemas
+# =========================================================================
+
+class ProposedActionSchema(BaseModel):
+    """Action proposed by the planner."""
+
+    action_type: str = Field(description="Unique action type matching allowlisted registry")
+    target_service: str = Field(description="Target microservice e.g. order-service, payment-service")
+    environment: str = Field(default="demo", description="Target environment")
+    parameters: dict[str, Any] = Field(default_factory=dict, description="Validated parameters")
+    rationale: str = Field(description="Why this specific action is justified by evidence")
+    expected_outcome: str = Field(description="Predicted impact on incident telemetry")
+    risk_level: RiskLevel = Field(default=RiskLevel.LOW, description="Risk rating")
+    reversible: bool = Field(default=True, description="Whether action is safely reversible")
+    preconditions: dict[str, Any] = Field(default_factory=dict, description="Required preconditions")
+    verification_conditions: dict[str, Any] = Field(
+        default_factory=dict, description="Telemetry verification criteria"
+    )
+
+
+class RemediationActionResponse(BaseModel):
+    """API response model for an individual remediation action."""
+
+    id: str
+    plan_id: str
+    action_type: str
+    target_service: str
+    environment: str
+    parameters: dict[str, Any]
+    rationale: str
+    expected_outcome: str
+    risk_level: str
+    reversible: bool
+    preconditions: dict[str, Any]
+    verification_conditions: dict[str, Any]
+    status: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# =========================================================================
+# Execution & Verification Schemas
+# =========================================================================
+
+class RemediationVerificationResponse(BaseModel):
+    """API response for recovery verification run."""
+
+    id: str
+    execution_id: str
+    status: str
+    started_at: datetime
+    completed_at: datetime | None
+    consecutive_healthy_count: int
+    required_healthy_count: int
+    observations: list[dict[str, Any]]
+    summary: str | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RemediationExecutionResponse(BaseModel):
+    """API response for execution status."""
+
+    id: str
+    plan_id: str
+    action_id: str
+    approval_id: str
+    idempotency_key: str
+    status: str
+    started_at: datetime | None
+    completed_at: datetime | None
+    duration_ms: float | None
+    execution_output: dict[str, Any] | None
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+    verification_runs: list[RemediationVerificationResponse] = Field(default_factory=list)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RemediationAuditEventResponse(BaseModel):
+    """API response for immutable audit trail events."""
+
+    id: str
+    incident_id: str
+    investigation_id: str | None
+    plan_id: str | None
+    action_id: str | None
+    execution_id: str | None
+    event_type: str
+    actor: str
+    details: dict[str, Any]
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# =========================================================================
+# Remediation Plan Schemas
+# =========================================================================
+
+class RemediationPlanCreateRequest(BaseModel):
+    """Request payload to formulate a remediation plan for an incident."""
+
+    investigation_id: str | None = Field(
+        default=None, description="Optional associated Phase 4 investigation UUID"
+    )
+    custom_context: str | None = Field(
+        default=None, description="Optional extra operator context or constraints"
+    )
+
+
+class RemediationPlanResponse(BaseModel):
+    """API response model for a complete remediation plan."""
+
+    id: str
+    incident_id: str
+    investigation_id: str | None
+    status: str
+    version: int
+    summary: str
+    root_cause_hypothesis: dict[str, Any] | None
+    supporting_evidence_ids: list[str]
+    contradicting_evidence_ids: list[str]
+    risk_assessment: dict[str, Any] | None
+    assumptions: list[str]
+    limitations: list[str]
+    expires_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    actions: list[RemediationActionResponse] = Field(default_factory=list)
+    executions: list[RemediationExecutionResponse] = Field(default_factory=list)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RemediationPlanProposal(BaseModel):
+    """Structured proposal generated by LLM or heuristic planner."""
+
+    summary: str = Field(description="Executive summary of the proposed remediation strategy")
+    root_cause_hypothesis: dict[str, Any] = Field(
+        description="Reference to primary investigated root cause hypothesis"
+    )
+    supporting_evidence_ids: list[str] = Field(
+        default_factory=list, description="Evidence IDs directly supporting this plan"
+    )
+    contradicting_evidence_ids: list[str] = Field(
+        default_factory=list, description="Evidence IDs contradicting or questioning this plan"
+    )
+    proposed_actions: list[ProposedActionSchema] = Field(
+        default_factory=list, description="List of allowlisted executable actions"
+    )
+    manual_recommendations: list[str] = Field(
+        default_factory=list, description="Recommendations requiring manual engineering intervention"
+    )
+    risk_assessment: dict[str, Any] = Field(
+        default_factory=dict, description="Comprehensive risk rating and blast radius assessment"
+    )
+    assumptions: list[str] = Field(
+        default_factory=list, description="Key assumptions underlying this remediation plan"
+    )
+    limitations: list[str] = Field(
+        default_factory=list, description="Disclosed gaps in telemetry or automated capability"
+    )
+
+
+# =========================================================================
+# Approval Schemas
+# =========================================================================
+
+class RemediationApprovalRequest(BaseModel):
+    """Operator approval submission."""
+
+    approver_id: str = Field(default="operator", description="Operator identity or username")
+    comment: str | None = Field(default=None, description="Optional approval justification or notes")
+    plan_version: int = Field(default=1, description="Immutable plan version being approved")
+
+
+class RemediationRejectionRequest(BaseModel):
+    """Operator rejection submission."""
+
+    approver_id: str = Field(default="operator", description="Operator identity or username")
+    comment: str = Field(description="Mandatory rationale for rejecting the action")
+
+
+class RemediationApprovalResponse(BaseModel):
+    """API response for approval record."""
+
+    id: str
+    plan_id: str
+    action_id: str
+    decision: str
+    approver_id: str
+    comment: str | None
+    plan_version: int
+    expires_at: datetime
+    decided_at: datetime
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)

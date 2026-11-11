@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { RemediationDrawerSection } from "./RemediationDrawerSection";
 
 export interface IncidentEvent {
   id: string;
@@ -63,6 +64,92 @@ export interface DetectionRunResult {
   evaluation_duration_ms: number;
 }
 
+// Phase 4 Investigation Types
+export interface InvestigationAgentRun {
+  id: string;
+  investigation_id: string;
+  agent_name: string;
+  status: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "SKIPPED";
+  duration_ms: number | null;
+  findings?: Record<string, unknown>;
+  error_message?: string | null;
+  created_at: string;
+}
+
+export interface Hypothesis {
+  hypothesis_id: string;
+  title: string;
+  explanation: string;
+  confidence: "LOW" | "MEDIUM" | "HIGH";
+  confidence_score: number;
+  supporting_evidence_ids: string[];
+  contradicting_evidence_ids?: string[];
+  affected_components: string[];
+  assumptions?: string[];
+  missing_information?: string[];
+  is_contested?: boolean;
+  validation_notes?: string[];
+}
+
+export interface EvidenceReference {
+  evidence_id: string;
+  source_type: "METRIC" | "LOG" | "TRACE" | "INCIDENT_HISTORY";
+  source_reference: string;
+  service_name: string;
+  timestamp?: string | null;
+  observation: string;
+  observed_value?: number | string | null;
+  relevant_threshold?: number | string | null;
+  relevance: string;
+  evidence_strength: string;
+  supporting_data?: Record<string, unknown>;
+  limitations?: string | null;
+}
+
+export interface FinalRCAReport {
+  executive_summary: string;
+  incident_description: string;
+  timeline?: Array<{ time: string; event: string }>;
+  observed_facts: string[];
+  hypotheses: Hypothesis[];
+  confidence_level: "LOW" | "MEDIUM" | "HIGH";
+  affected_services: string[];
+  contributing_factors?: string[];
+  recommended_next_steps?: string[];
+  evidence_sources?: EvidenceReference[];
+  investigation_limitations?: string[];
+  validated_at?: string | null;
+}
+
+export interface Investigation {
+  id: string;
+  incident_id: string;
+  status: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
+  trigger_type: "manual" | "automatic";
+  model_provider?: string;
+  model_name?: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  total_duration_ms?: number | null;
+  summary?: string | null;
+  error_message?: string | null;
+  final_report?: FinalRCAReport | null;
+  agent_runs?: InvestigationAgentRun[];
+  created_at: string;
+  updated_at: string;
+}
+
+const AGENT_DISPLAY_NAMES: Record<string, string> = {
+  incident_analyzer: "Incident Analyzer",
+  metrics_agent: "Metrics Investigator",
+  log_agent: "Log Investigator",
+  trace_agent: "Trace Investigator",
+  historical_agent: "Historical Context",
+  aggregator: "Evidence Aggregator",
+  rca_agent: "RCA Synthesizer",
+  validator_agent: "Evidence Validator",
+};
+
 export default function IncidentsDashboard() {
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [stats, setStats] = useState<IncidentStats | null>(null);
@@ -79,6 +166,12 @@ export default function IncidentsDashboard() {
   const [detail, setDetail] = useState<IncidentDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState<boolean>(false);
   const [actionLoading, setActionLoading] = useState<boolean>(false);
+
+  // Autonomous Investigation States
+  const [investigations, setInvestigations] = useState<Investigation[]>([]);
+  const [selectedInvestigation, setSelectedInvestigation] = useState<Investigation | null>(null);
+  const [startingInvestigation, setStartingInvestigation] = useState<boolean>(false);
+  const [expandedEvidenceId, setExpandedEvidenceId] = useState<string | null>(null);
 
   // Detection Run
   const [evaluating, setEvaluating] = useState<boolean>(false);
@@ -129,25 +222,144 @@ export default function IncidentsDashboard() {
     };
   }, [fetchIncidents]);
 
+  const fetchInvestigationDetail = useCallback(async (invId: string) => {
+    try {
+      const res = await fetch(`${apiUrl}/api/v1/investigations/${invId}`, { cache: "no-store" });
+      if (res.ok) {
+        const fullInv: Investigation = await res.json();
+        setSelectedInvestigation(fullInv);
+      }
+    } catch {
+      // ignore
+    }
+  }, [apiUrl]);
+
+  // Load selected incident details and investigation history
   useEffect(() => {
     let isMounted = true;
     if (selectedId) {
-      fetch(`${apiUrl}/api/v1/incidents/${selectedId}`, { cache: "no-store" })
-        .then((res) => (res.ok ? res.json() : null))
-        .then((data) => {
+      const loadDrawerData = async () => {
+        try {
+          const [detailRes, invRes] = await Promise.all([
+            fetch(`${apiUrl}/api/v1/incidents/${selectedId}`, { cache: "no-store" }),
+            fetch(`${apiUrl}/api/v1/incidents/${selectedId}/investigations`, { cache: "no-store" }),
+          ]);
+
           if (isMounted) {
-            setDetail(data);
-            setDetailLoading(false);
+            if (detailRes.ok) {
+              const d = await detailRes.json();
+              setDetail(d);
+            }
+            if (invRes.ok) {
+              const invs: Investigation[] = await invRes.json();
+              setInvestigations(invs);
+              if (invs.length > 0) {
+                const fullRes = await fetch(`${apiUrl}/api/v1/investigations/${invs[0].id}`, { cache: "no-store" });
+                if (fullRes.ok && isMounted) {
+                  const fullInv: Investigation = await fullRes.json();
+                  setSelectedInvestigation(fullInv);
+                }
+              } else {
+                setSelectedInvestigation(null);
+              }
+            }
           }
-        })
-        .catch(() => {
+        } catch {
+          // ignore
+        } finally {
           if (isMounted) setDetailLoading(false);
-        });
+        }
+      };
+      void loadDrawerData();
     }
     return () => {
       isMounted = false;
     };
   }, [selectedId, apiUrl]);
+
+  // Polling for active investigation progress
+  useEffect(() => {
+    let isMounted = true;
+    if (
+      selectedInvestigation &&
+      (selectedInvestigation.status === "RUNNING" || selectedInvestigation.status === "PENDING")
+    ) {
+      const pollTimer = setInterval(async () => {
+        try {
+          const res = await fetch(`${apiUrl}/api/v1/investigations/${selectedInvestigation.id}`, {
+            cache: "no-store",
+          });
+          if (res.ok && isMounted) {
+            const updated: Investigation = await res.json();
+            setSelectedInvestigation(updated);
+            if (updated.status === "COMPLETED" || updated.status === "FAILED") {
+              clearInterval(pollTimer);
+              void fetchIncidents();
+              if (selectedId) {
+                const listRes = await fetch(`${apiUrl}/api/v1/incidents/${selectedId}/investigations`, { cache: "no-store" });
+                if (listRes.ok && isMounted) {
+                  const invs: Investigation[] = await listRes.json();
+                  setInvestigations(invs);
+                }
+              }
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }, 2500);
+
+      return () => {
+        isMounted = false;
+        clearInterval(pollTimer);
+      };
+    }
+  }, [selectedInvestigation, apiUrl, selectedId, fetchIncidents]);
+
+  // Trigger autonomous investigation
+  const handleStartInvestigation = async () => {
+    if (!selectedId) return;
+    setStartingInvestigation(true);
+    try {
+      const res = await fetch(`${apiUrl}/api/v1/incidents/${selectedId}/investigations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ trigger_type: "manual" }),
+      });
+      if (res.ok) {
+        const created: Investigation = await res.json();
+        setInvestigations((prev) => [created, ...prev]);
+        setSelectedInvestigation(created);
+        void fetchIncidents();
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        alert(`Could not start investigation: ${errData.detail || "Unknown error"}`);
+      }
+    } catch (err) {
+      alert(`Error contacting server: ${String(err)}`);
+    } finally {
+      setStartingInvestigation(false);
+    }
+  };
+
+  // Retry failed investigation
+  const handleRetryInvestigation = async () => {
+    if (!selectedInvestigation) return;
+    setStartingInvestigation(true);
+    try {
+      const res = await fetch(`${apiUrl}/api/v1/investigations/${selectedInvestigation.id}/retry`, {
+        method: "POST",
+      });
+      if (res.ok) {
+        const retried: Investigation = await res.json();
+        setSelectedInvestigation(retried);
+      }
+    } catch (err) {
+      alert(`Retry failed: ${String(err)}`);
+    } finally {
+      setStartingInvestigation(false);
+    }
+  };
 
   // Lifecycle action handler
   const handleAction = async (action: "acknowledge" | "investigate" | "resolve") => {
@@ -157,7 +369,7 @@ export default function IncidentsDashboard() {
       const res = await fetch(`${apiUrl}/api/v1/incidents/${selectedId}/${action}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ actor: "sre-engineer", comment: `Status updated via OpsPilot Web UI` }),
+        body: JSON.stringify({ actor: "sre-engineer", comment: "Status updated via OpsPilot Web UI" }),
       });
       if (res.ok) {
         const updated = await res.json();
@@ -218,7 +430,19 @@ export default function IncidentsDashboard() {
     }
   };
 
-  const formatTimestamp = (isoString: string) => {
+  const getConfidenceBadge = (conf: string) => {
+    switch (conf) {
+      case "HIGH":
+        return "bg-emerald-500/20 text-emerald-300 border-emerald-500/40";
+      case "MEDIUM":
+        return "bg-amber-500/20 text-amber-300 border-amber-500/40";
+      default:
+        return "bg-slate-500/20 text-slate-400 border-slate-500/40";
+    }
+  };
+
+  const formatTimestamp = (isoString?: string | null) => {
+    if (!isoString) return "-";
     try {
       const d = new Date(isoString);
       return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -248,7 +472,7 @@ export default function IncidentsDashboard() {
           <div className="text-2xl font-bold font-mono text-rose-400 mt-1">
             {stats ? stats.critical_incidents : "-"}
           </div>
-          <div className="text-[11px] text-rose-500/70 mt-1 font-mono">P0 Outages</div>
+          <div className="text-[11px] text-rose-500/80 mt-1 font-mono">Immediate SLA Threat</div>
         </div>
 
         <div className="bg-slate-900/60 border border-amber-950/60 rounded-xl p-4">
@@ -258,145 +482,152 @@ export default function IncidentsDashboard() {
           <div className="text-2xl font-bold font-mono text-amber-400 mt-1">
             {stats ? stats.high_incidents : "-"}
           </div>
-          <div className="text-[11px] text-amber-500/70 mt-1 font-mono">SLA Impact</div>
+          <div className="text-[11px] text-amber-500/80 mt-1 font-mono">Degraded Performance</div>
+        </div>
+
+        <div className="bg-slate-900/60 border border-indigo-950/60 rounded-xl p-4">
+          <div className="text-[11px] font-mono uppercase tracking-wider text-indigo-400">
+            Investigating
+          </div>
+          <div className="text-2xl font-bold font-mono text-indigo-400 mt-1">
+            {stats ? stats.investigating_incidents : "-"}
+          </div>
+          <div className="text-[11px] text-indigo-500/80 mt-1 font-mono">Autonomous RCA Active</div>
         </div>
 
         <div className="bg-slate-900/60 border border-emerald-950/60 rounded-xl p-4">
           <div className="text-[11px] font-mono uppercase tracking-wider text-emerald-400">
-            Resolved
+            Auto-Resolved
           </div>
           <div className="text-2xl font-bold font-mono text-emerald-400 mt-1">
             {stats ? stats.resolved_incidents : "-"}
           </div>
-          <div className="text-[11px] text-emerald-500/70 mt-1 font-mono">Closed & Verified</div>
+          <div className="text-[11px] text-emerald-500/80 mt-1 font-mono">Verified Recoveries</div>
+        </div>
+      </div>
+
+      {/* Action Header & Manual Evaluation Trigger */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-slate-900/40 border border-slate-800 rounded-xl p-4">
+        <div>
+          <h2 className="text-base font-bold text-white tracking-tight flex items-center gap-2">
+            <span>Deterministic Incident Detection & Autonomous RCA</span>
+            <span className="text-[10px] font-mono bg-indigo-500/10 text-indigo-400 px-2 py-0.5 rounded border border-indigo-500/30">
+              Phase 3 + Phase 4 (LangGraph)
+            </span>
+          </h2>
+          <p className="text-xs text-slate-400 font-mono mt-0.5">
+            Evaluating Prometheus golden signals every 30s. AI agents autonomously investigate root cause.
+          </p>
         </div>
 
-        <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
-          <div>
-            <div className="text-[11px] font-mono uppercase tracking-wider text-slate-400">
-              Deterministic Detection
-            </div>
-            <div className="text-xs text-slate-300 font-mono mt-1">6 Active Rules</div>
-          </div>
+        <div className="flex items-center gap-3">
           <button
             onClick={handleRunEvaluation}
             disabled={evaluating}
-            className="w-full mt-2 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-xs font-mono font-medium transition-colors flex items-center justify-center gap-1.5"
+            className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-mono font-medium rounded-lg transition-colors flex items-center gap-2 shadow-sm"
           >
             {evaluating ? (
               <>
-                <span className="h-2 w-2 rounded-full bg-white animate-ping" />
-                Evaluating...
+                <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-solid border-white border-r-transparent" />
+                <span>Evaluating Rules...</span>
               </>
             ) : (
               <>
-                <span>&#9654;</span> Evaluate Now
+                <span>&#x25B6;</span>
+                <span>Run Detection Now</span>
               </>
             )}
           </button>
         </div>
       </div>
 
-      {/* Detection Evaluation Feedback Banner */}
+      {/* Detection Result Banner if Triggered */}
       {evalResult && (
-        <div className="bg-indigo-950/50 border border-indigo-800/80 rounded-xl p-3 px-4 flex items-center justify-between text-xs font-mono text-indigo-200">
-          <div className="flex items-center gap-2">
-            <span className="h-2 w-2 rounded-full bg-indigo-400" />
-            <span>
-              Evaluation cycle finished in <strong>{evalResult.evaluation_duration_ms}ms</strong>:
-              Evaluated {evalResult.rules_evaluated} rules &rarr; {evalResult.breaches_detected} breaches,{" "}
-              {evalResult.incidents_created} created, {evalResult.incidents_updated} updated,{" "}
-              {evalResult.incidents_resolved} auto-resolved.
-            </span>
+        <div className="bg-slate-900 border border-slate-700/80 rounded-xl p-4 text-xs font-mono text-slate-300 flex items-center justify-between animate-in fade-in">
+          <div className="flex items-center gap-4">
+            <span className="text-emerald-400 font-bold">&#x2713; Pass Finished</span>
+            <span>Rules: {evalResult.rules_evaluated}</span>
+            <span>Breaches: {evalResult.breaches_detected}</span>
+            <span className="text-rose-400 font-semibold">Created: {evalResult.incidents_created}</span>
+            <span className="text-amber-400 font-semibold">Updated: {evalResult.incidents_updated}</span>
+            <span className="text-emerald-400 font-semibold">Resolved: {evalResult.incidents_resolved}</span>
+            <span className="text-slate-500">Duration: {evalResult.evaluation_duration_ms}ms</span>
           </div>
           <button
             onClick={() => setEvalResult(null)}
-            className="text-slate-400 hover:text-white ml-4"
+            className="text-slate-500 hover:text-slate-300 text-sm font-bold"
           >
             &times;
           </button>
         </div>
       )}
 
-      {/* Filter and Query Toolbar */}
-      <div className="bg-slate-900/40 border border-slate-800 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
-        {/* Status Filter Tabs */}
-        <div className="flex items-center bg-slate-950 p-1 rounded-lg border border-slate-800">
-          {[
-            { label: "Active", value: "active" },
-            { label: "All", value: "ALL" },
-            { label: "Open", value: "OPEN" },
-            { label: "Acknowledged", value: "ACKNOWLEDGED" },
-            { label: "Investigating", value: "INVESTIGATING" },
-            { label: "Resolved", value: "RESOLVED" },
-          ].map((tab) => (
-            <button
-              key={tab.value}
-              onClick={() => setStatusFilter(tab.value)}
-              className={`px-3 py-1 rounded-md transition-colors ${
-                statusFilter === tab.value
-                  ? "bg-slate-800 text-white font-semibold"
-                  : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
+      {/* Incidents Filter Controls */}
+      <div className="flex flex-wrap items-center gap-3 text-xs font-mono">
+        <span className="text-slate-400 text-[11px] uppercase tracking-wider">Filters:</span>
 
-        {/* Severity and Service Selects */}
-        <div className="flex items-center gap-2">
-          <select
-            value={severityFilter}
-            onChange={(e) => setSeverityFilter(e.target.value)}
-            className="bg-slate-950 border border-slate-800 text-slate-300 rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-indigo-500"
-          >
-            <option value="ALL">All Severities</option>
-            <option value="CRITICAL">Critical</option>
-            <option value="HIGH">High</option>
-            <option value="MEDIUM">Medium</option>
-            <option value="LOW">Low</option>
-          </select>
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+          className="bg-slate-900 border border-slate-800 text-slate-200 rounded-lg px-2.5 py-1 text-xs focus:outline-none focus:border-indigo-500"
+        >
+          <option value="active">Status: Active Only (Open/Ack/Investigating)</option>
+          <option value="ALL">Status: All Statuses</option>
+          <option value="OPEN">Status: OPEN</option>
+          <option value="ACKNOWLEDGED">Status: ACKNOWLEDGED</option>
+          <option value="INVESTIGATING">Status: INVESTIGATING</option>
+          <option value="RESOLVED">Status: RESOLVED</option>
+        </select>
 
-          <select
-            value={serviceFilter}
-            onChange={(e) => setServiceFilter(e.target.value)}
-            className="bg-slate-950 border border-slate-800 text-slate-300 rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-indigo-500"
-          >
-            <option value="ALL">All Services</option>
-            <option value="api-gateway">api-gateway</option>
-            <option value="order-service">order-service</option>
-            <option value="payment-service">payment-service</option>
-          </select>
+        <select
+          value={severityFilter}
+          onChange={(e) => setSeverityFilter(e.target.value)}
+          className="bg-slate-900 border border-slate-800 text-slate-200 rounded-lg px-2.5 py-1 text-xs focus:outline-none focus:border-indigo-500"
+        >
+          <option value="ALL">Severity: All Severities</option>
+          <option value="CRITICAL">Severity: CRITICAL</option>
+          <option value="HIGH">Severity: HIGH</option>
+          <option value="MEDIUM">Severity: MEDIUM</option>
+          <option value="LOW">Severity: LOW</option>
+        </select>
 
-          <button
-            onClick={() => fetchIncidents()}
-            className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-colors"
-            title="Refresh list"
-          >
-            &#x21bb;
-          </button>
-        </div>
+        <select
+          value={serviceFilter}
+          onChange={(e) => setServiceFilter(e.target.value)}
+          className="bg-slate-900 border border-slate-800 text-slate-200 rounded-lg px-2.5 py-1 text-xs focus:outline-none focus:border-indigo-500"
+        >
+          <option value="ALL">Service: All Services</option>
+          <option value="api-gateway">api-gateway</option>
+          <option value="order-service">order-service</option>
+          <option value="payment-service">payment-service</option>
+        </select>
+
+        <button
+          onClick={() => {
+            setStatusFilter("active");
+            setSeverityFilter("ALL");
+            setServiceFilter("ALL");
+          }}
+          className="text-slate-400 hover:text-slate-200 underline text-[11px]"
+        >
+          Reset Filters
+        </button>
       </div>
 
       {/* Incidents Table */}
-      <div className="bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden shadow-sm">
+      <div className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden shadow-sm">
         {loading ? (
-          <div className="py-16 text-center text-slate-500 font-mono text-xs">
-            Loading active incident records...
+          <div className="py-20 text-center text-slate-500 font-mono text-xs">
+            Loading active SRE incidents...
           </div>
         ) : error ? (
-          <div className="py-12 text-center text-rose-400 font-mono text-xs">
-            {error}
-          </div>
+          <div className="py-12 text-center text-rose-400 font-mono text-xs">{error}</div>
         ) : incidents.length === 0 ? (
-          <div className="py-16 text-center space-y-2">
-            <div className="h-8 w-8 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center justify-center mx-auto text-sm">
-              &#10003;
-            </div>
-            <div className="text-white font-medium text-sm">All Monitored Services Healthy</div>
-            <div className="text-slate-400 text-xs font-mono max-w-sm mx-auto">
-              No matching incidents found for the active filter. Trigger fault injection to test autonomous threshold detection.
+          <div className="py-16 text-center text-slate-500 font-mono space-y-2">
+            <div className="text-2xl">&#x2713;</div>
+            <div className="text-slate-300 font-semibold">No Incidents Found</div>
+            <div className="text-xs text-slate-500">
+              All monitored microservices are within healthy SLA/SLO thresholds.
             </div>
           </div>
         ) : (
@@ -477,10 +708,10 @@ export default function IncidentsDashboard() {
         )}
       </div>
 
-      {/* Slide-out Incident Detail Drawer */}
+      {/* Slide-out Incident Detail & Autonomous Investigation Drawer */}
       {selectedId && (
         <div className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="w-full max-w-xl bg-slate-950 border-l border-slate-800 h-full overflow-y-auto p-6 space-y-6 flex flex-col shadow-2xl">
+          <div className="w-full max-w-2xl bg-slate-950 border-l border-slate-800 h-full overflow-y-auto p-6 space-y-6 flex flex-col shadow-2xl">
             {/* Drawer Header */}
             <div className="flex items-start justify-between border-b border-slate-800 pb-4">
               <div className="space-y-1">
@@ -520,11 +751,12 @@ export default function IncidentsDashboard() {
                 Loading incident details...
               </div>
             ) : (
-              <div className="space-y-6 flex-1 text-xs">
+              <div className="space-y-6 flex-1 text-xs font-mono">
                 {/* Operator Lifecycle Controls */}
                 <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
-                  <div className="text-[11px] font-mono uppercase tracking-wider text-slate-400">
-                    Incident Response Actions
+                  <div className="text-[11px] font-mono uppercase tracking-wider text-slate-400 flex items-center justify-between">
+                    <span>Incident Response Actions</span>
+                    <span className="text-[10px] text-slate-500">ID: {detail.id.slice(0, 8)}...</span>
                   </div>
                   <div className="flex items-center gap-2">
                     {detail.status === "OPEN" && (
@@ -541,7 +773,7 @@ export default function IncidentsDashboard() {
                           disabled={actionLoading}
                           className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-mono rounded-lg transition-colors"
                         >
-                          Start Investigation
+                          Mark Investigating
                         </button>
                       </>
                     )}
@@ -553,7 +785,7 @@ export default function IncidentsDashboard() {
                           disabled={actionLoading}
                           className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-mono rounded-lg transition-colors"
                         >
-                          Start Investigation
+                          Mark Investigating
                         </button>
                         <button
                           onClick={() => handleAction("resolve")}
@@ -584,7 +816,437 @@ export default function IncidentsDashboard() {
                   </div>
                 </div>
 
-                {/* Structured Evidence Section */}
+                {/* ========================================================================= */}
+                {/* PHASE 4: AUTONOMOUS MULTI-AGENT RCA INVESTIGATION (LANGGRAPH) */}
+                {/* ========================================================================= */}
+                <div className="bg-gradient-to-b from-indigo-950/40 to-slate-900/60 border border-indigo-900/50 rounded-xl p-4 space-y-4 shadow-md">
+                  <div className="flex items-center justify-between border-b border-indigo-900/40 pb-3">
+                    <div className="space-y-0.5">
+                      <div className="text-[11px] uppercase tracking-wider text-indigo-300 font-bold flex items-center gap-1.5">
+                        <span>&#x2728; Autonomous Investigation & RCA</span>
+                        <span className="text-[10px] bg-indigo-500/20 text-indigo-300 px-1.5 py-0.2 rounded border border-indigo-500/30">
+                          LangGraph
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-slate-400">
+                        Multi-agent swarm correlates metrics, logs, traces, and past incidents.
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={handleStartInvestigation}
+                      disabled={startingInvestigation || selectedInvestigation?.status === "RUNNING"}
+                      className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-mono font-medium rounded-lg transition-colors shadow-sm flex items-center gap-1.5"
+                    >
+                      {startingInvestigation ? (
+                        <>
+                          <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-solid border-white border-r-transparent" />
+                          <span>Dispatching...</span>
+                        </>
+                      ) : (
+                        <>
+                          <span>&#x25B6;</span>
+                          <span>{selectedInvestigation ? "Re-run Investigation" : "Start Autonomous Investigation"}</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  {/* Past Runs Selector */}
+                  {investigations.length > 1 && (
+                    <div className="flex items-center gap-2 text-[11px]">
+                      <span className="text-slate-400">Past Runs:</span>
+                      <div className="flex items-center gap-1 overflow-x-auto">
+                        {investigations.map((inv, idx) => (
+                          <button
+                            key={inv.id}
+                            onClick={() => void fetchInvestigationDetail(inv.id)}
+                            className={`px-2 py-0.5 rounded border text-[10px] font-mono transition-colors ${
+                              selectedInvestigation?.id === inv.id
+                                ? "bg-indigo-600 text-white border-indigo-500"
+                                : "bg-slate-900 text-slate-400 border-slate-800 hover:border-slate-700"
+                            }`}
+                          >
+                            Run #{investigations.length - idx} ({inv.status})
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {!selectedInvestigation ? (
+                    <div className="py-6 text-center text-slate-500 font-mono text-xs">
+                      No investigation has been executed for this incident yet. Click &quot;Start Autonomous Investigation&quot; to begin.
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {/* Investigation Status Bar */}
+                      <div className="bg-slate-950/80 border border-slate-800 rounded-lg p-3 flex flex-wrap items-center justify-between gap-3 text-xs">
+                        <div className="flex items-center gap-2">
+                          <span className="text-slate-400">Status:</span>
+                          <span
+                            className={`px-2 py-0.5 rounded border text-[10px] font-bold ${
+                              selectedInvestigation.status === "COMPLETED"
+                                ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+                                : selectedInvestigation.status === "RUNNING"
+                                ? "bg-sky-500/10 text-sky-400 border-sky-500/30 animate-pulse"
+                                : selectedInvestigation.status === "FAILED"
+                                ? "bg-rose-500/10 text-rose-400 border-rose-500/30"
+                                : "bg-amber-500/10 text-amber-400 border-amber-500/30"
+                            }`}
+                          >
+                            {selectedInvestigation.status}
+                          </span>
+                          {selectedInvestigation.model_name && (
+                            <span className="text-slate-500 text-[11px]">
+                              Model: <span className="text-slate-300">{selectedInvestigation.model_name}</span>
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-3 text-slate-400 text-[11px]">
+                          {selectedInvestigation.total_duration_ms && (
+                            <span>
+                              Duration:{" "}
+                              <strong className="text-slate-200">
+                                {(selectedInvestigation.total_duration_ms / 1000).toFixed(1)}s
+                              </strong>
+                            </span>
+                          )}
+                          <span>Started: {formatTimestamp(selectedInvestigation.started_at)}</span>
+                        </div>
+                      </div>
+
+                      {/* Specialized Agent Execution Swarm Pipeline */}
+                      <div className="space-y-2">
+                        <div className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">
+                          Multi-Agent Swarm Pipeline
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                          {[
+                            "incident_analyzer",
+                            "metrics_agent",
+                            "log_agent",
+                            "trace_agent",
+                            "historical_agent",
+                            "aggregator",
+                            "rca_agent",
+                            "validator_agent",
+                          ].map((agKey) => {
+                            const run = selectedInvestigation.agent_runs?.find((r) => r.agent_name === agKey);
+                            const agStatus = run?.status || (selectedInvestigation.status === "COMPLETED" ? "COMPLETED" : "PENDING");
+                            return (
+                              <div
+                                key={agKey}
+                                className="bg-slate-900 border border-slate-800 rounded-lg p-2.5 space-y-1 text-[11px]"
+                              >
+                                <div className="text-slate-300 font-semibold truncate">
+                                  {AGENT_DISPLAY_NAMES[agKey]}
+                                </div>
+                                <div className="flex items-center justify-between">
+                                  <span
+                                    className={`px-1.5 py-0.2 rounded text-[9px] font-bold ${
+                                      agStatus === "COMPLETED"
+                                        ? "text-emerald-400 bg-emerald-950/60"
+                                        : agStatus === "RUNNING"
+                                        ? "text-sky-400 bg-sky-950/60 animate-pulse"
+                                        : agStatus === "FAILED"
+                                        ? "text-rose-400 bg-rose-950/60"
+                                        : "text-slate-500 bg-slate-950"
+                                    }`}
+                                  >
+                                    {agStatus === "COMPLETED" ? "\u2713 DONE" : agStatus}
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Error Banner if Failed */}
+                      {selectedInvestigation.status === "FAILED" && (
+                        <div className="bg-rose-950/40 border border-rose-900/60 rounded-xl p-3 text-xs text-rose-300 space-y-2">
+                          <div className="font-bold flex items-center justify-between">
+                            <span>Investigation Failed</span>
+                            <button
+                              onClick={handleRetryInvestigation}
+                              className="px-2 py-0.5 bg-rose-800 hover:bg-rose-700 text-white rounded text-[10px]"
+                            >
+                              Retry
+                            </button>
+                          </div>
+                          <div className="text-[11px] text-rose-400 font-mono">
+                            {selectedInvestigation.error_message || "An unhandled error occurred during execution."}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* RCA Report Output Display */}
+                      {selectedInvestigation.final_report && (
+                        <div className="space-y-4 pt-2">
+                          {/* Executive Summary Card */}
+                          <div className="bg-slate-900 border border-indigo-900/40 rounded-xl p-4 space-y-2.5">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[11px] uppercase tracking-wider text-indigo-300 font-bold">
+                                Executive Summary
+                              </span>
+                              <span
+                                className={`px-2 py-0.5 rounded border text-[10px] font-bold ${getConfidenceBadge(
+                                  selectedInvestigation.final_report.confidence_level
+                                )}`}
+                              >
+                                Confidence: {selectedInvestigation.final_report.confidence_level}
+                              </span>
+                            </div>
+                            <p className="text-slate-200 text-xs leading-relaxed font-sans">
+                              {selectedInvestigation.final_report.executive_summary}
+                            </p>
+                          </div>
+
+                          {/* Observed Empirical Facts */}
+                          {selectedInvestigation.final_report.observed_facts?.length > 0 && (
+                            <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-4 space-y-2">
+                              <div className="text-[11px] uppercase tracking-wider text-slate-400 font-bold">
+                                Empirical Observed Facts ({selectedInvestigation.final_report.observed_facts.length})
+                              </div>
+                              <ul className="space-y-1.5 list-none pl-0">
+                                {selectedInvestigation.final_report.observed_facts.map((fact, idx) => (
+                                  <li key={idx} className="text-slate-300 text-[11px] flex items-start gap-2">
+                                    <span className="text-emerald-400 font-bold mt-0.5">&#x2022;</span>
+                                    <span>{fact}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+
+                          {/* Root Cause Hypotheses */}
+                          {selectedInvestigation.final_report.hypotheses?.length > 0 && (
+                            <div className="space-y-3">
+                              <div className="text-[11px] uppercase tracking-wider text-slate-400 font-bold">
+                                Formulated Root-Cause Hypotheses ({selectedInvestigation.final_report.hypotheses.length})
+                              </div>
+
+                              <div className="space-y-3">
+                                {selectedInvestigation.final_report.hypotheses.map((hyp) => (
+                                  <div
+                                    key={hyp.hypothesis_id}
+                                    className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-2.5"
+                                  >
+                                    <div className="flex items-start justify-between gap-2">
+                                      <div className="space-y-1">
+                                        <div className="text-[10px] text-indigo-400 font-bold">
+                                          {hyp.hypothesis_id}
+                                        </div>
+                                        <div className="text-sm font-bold text-white">{hyp.title}</div>
+                                      </div>
+                                      <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                                        {hyp.is_contested && (
+                                          <span className="px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-300 text-[10px] font-bold">
+                                            Contested
+                                          </span>
+                                        )}
+                                        <span
+                                          className={`px-2 py-0.5 rounded border text-[10px] font-bold whitespace-nowrap ${getConfidenceBadge(
+                                            hyp.confidence
+                                          )}`}
+                                        >
+                                          {hyp.confidence} (Score: {hyp.confidence_score.toFixed(2)})
+                                        </span>
+                                      </div>
+                                    </div>
+
+                                    <p className="text-slate-300 text-xs font-sans leading-relaxed">
+                                      {hyp.explanation}
+                                    </p>
+
+                                    {/* Validation Notes if any */}
+                                    {hyp.validation_notes && hyp.validation_notes.length > 0 && (
+                                      <div className="bg-slate-950/60 border border-slate-800/80 rounded-lg p-2.5 space-y-1">
+                                        <div className="text-[10px] font-bold text-slate-400">Validation Checks:</div>
+                                        <ul className="text-[10px] text-slate-400 space-y-0.5 pl-3 list-disc">
+                                          {hyp.validation_notes.map((note, nIdx) => (
+                                            <li key={nIdx}>{note}</li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    )}
+
+                                    {/* Supporting Evidence Chips */}
+                                    {hyp.supporting_evidence_ids?.length > 0 && (
+                                      <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                                        <span className="text-slate-500 text-[10px]">Cites:</span>
+                                        {hyp.supporting_evidence_ids.map((evId) => (
+                                          <button
+                                            key={evId}
+                                            onClick={() =>
+                                              setExpandedEvidenceId(expandedEvidenceId === evId ? null : evId)
+                                            }
+                                            className="px-1.5 py-0.5 rounded bg-indigo-950/70 border border-indigo-800/60 text-indigo-300 text-[10px] hover:border-indigo-500 font-mono"
+                                          >
+                                            {evId}
+                                          </button>
+                                        ))}
+                                      </div>
+                                    )}
+
+                                    {/* Affected Components & Assumptions */}
+                                    {hyp.affected_components?.length > 0 && (
+                                      <div className="text-[10px] text-slate-400 flex items-center gap-1.5 pt-1">
+                                        <span className="text-slate-500">Affected:</span>
+                                        {hyp.affected_components.map((comp) => (
+                                          <span
+                                            key={comp}
+                                            className="bg-slate-800 px-1.5 py-0.5 rounded text-slate-300"
+                                          >
+                                            {comp}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Evidence Sources & Deep Links */}
+                          {selectedInvestigation.final_report.evidence_sources &&
+                            selectedInvestigation.final_report.evidence_sources.length > 0 && (
+                              <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 space-y-3">
+                                <div className="text-[11px] uppercase tracking-wider text-slate-400 font-bold">
+                                  Telemetry Evidence Sources ({selectedInvestigation.final_report.evidence_sources.length})
+                                </div>
+
+                                <div className="space-y-2">
+                                  {selectedInvestigation.final_report.evidence_sources.map((ev) => {
+                                    const isExpanded = expandedEvidenceId === ev.evidence_id;
+                                    const deepLink = (ev.supporting_data?.deep_link as string) || "";
+                                    return (
+                                      <div
+                                        key={ev.evidence_id}
+                                        className={`p-3 rounded-lg border transition-all ${
+                                          isExpanded
+                                            ? "bg-slate-900 border-indigo-500/60 shadow-sm"
+                                            : "bg-slate-950/60 border-slate-800/80"
+                                        }`}
+                                      >
+                                        <div
+                                          onClick={() =>
+                                            setExpandedEvidenceId(isExpanded ? null : ev.evidence_id)
+                                          }
+                                          className="cursor-pointer flex items-start justify-between gap-2"
+                                        >
+                                          <div className="space-y-1">
+                                            <div className="flex items-center gap-2">
+                                              <span className="text-[10px] font-bold text-indigo-300 font-mono">
+                                                {ev.evidence_id}
+                                              </span>
+                                              <span
+                                                className={`px-1.5 py-0.2 rounded text-[9px] font-bold ${
+                                                  ev.source_type === "METRIC"
+                                                    ? "bg-amber-950 text-amber-300 border border-amber-800"
+                                                    : ev.source_type === "LOG"
+                                                    ? "bg-sky-950 text-sky-300 border border-sky-800"
+                                                    : ev.source_type === "TRACE"
+                                                    ? "bg-indigo-950 text-indigo-300 border border-indigo-800"
+                                                    : "bg-purple-950 text-purple-300 border border-purple-800"
+                                                }`}
+                                              >
+                                                {ev.source_type}
+                                              </span>
+                                              <span className="text-[10px] text-slate-500 font-mono">
+                                                {ev.service_name}
+                                              </span>
+                                            </div>
+                                            <div className="text-slate-200 text-xs">{ev.observation}</div>
+                                          </div>
+                                          <span className="text-slate-500 text-xs font-mono">
+                                            {isExpanded ? "\u25B2" : "\u25BC"}
+                                          </span>
+                                        </div>
+
+                                        {isExpanded && (
+                                          <div className="mt-3 pt-3 border-t border-slate-800/80 space-y-2 text-[11px]">
+                                            <div>
+                                              <div className="text-[10px] text-slate-500">Query / Reference:</div>
+                                              <pre className="bg-slate-950 p-2 rounded border border-slate-800 text-[10px] text-slate-300 overflow-x-auto mt-0.5">
+                                                {ev.source_reference}
+                                              </pre>
+                                            </div>
+
+                                            {deepLink && (
+                                              <div className="pt-1">
+                                                <a
+                                                  href={deepLink}
+                                                  target="_blank"
+                                                  rel="noreferrer"
+                                                  className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-indigo-900/40 hover:bg-indigo-900/60 text-indigo-300 rounded border border-indigo-700/50 transition-colors"
+                                                >
+                                                  <span>Open in Observability Tool</span>
+                                                  <span>&rarr;</span>
+                                                </a>
+                                              </div>
+                                            )}
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            )}
+
+                          {/* Recommended Next Steps */}
+                          {selectedInvestigation.final_report.recommended_next_steps &&
+                            selectedInvestigation.final_report.recommended_next_steps.length > 0 && (
+                              <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 space-y-2">
+                                <div className="text-[11px] uppercase tracking-wider text-slate-400 font-bold">
+                                  Recommended Next Steps
+                                </div>
+                                <ol className="space-y-1.5 pl-4 list-decimal text-slate-300 text-xs">
+                                  {selectedInvestigation.final_report.recommended_next_steps.map((step, idx) => (
+                                    <li key={idx} className="leading-relaxed">
+                                      {step}
+                                    </li>
+                                  ))}
+                                </ol>
+                              </div>
+                            )}
+
+                          {/* Calibration Disclaimer Note */}
+                          <div className="text-[10px] text-slate-500 italic pt-1 border-t border-slate-800">
+                            * Note: Confidence scores (0.00 – 1.00) are deterministic heuristic ratings based on telemetry source diversity and validation consistency, not statistical Bayesian probabilities.
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* ========================================================================= */}
+                {/* PHASE 5: CONTROLLED REMEDIATION & RECOVERY VERIFICATION */}
+                {/* ========================================================================= */}
+                <RemediationDrawerSection
+                  incidentId={detail.id}
+                  investigationId={selectedInvestigation?.id}
+                  apiUrl={apiUrl}
+                  onIncidentResolved={async () => {
+                    try {
+                      const res = await fetch(`${apiUrl}/api/v1/incidents/${detail.id}`);
+                      if (res.ok) {
+                        const updated = await res.json();
+                        setDetail(updated);
+                      }
+                    } catch {
+                      // ignore
+                    }
+                    void fetchIncidents();
+                  }}
+                />
+
+                {/* Structured Deterministic Evidence Section */}
                 <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 space-y-3 font-mono">
                   <div className="text-[11px] uppercase tracking-wider text-slate-400">
                     Deterministic Evidence & Telemetry

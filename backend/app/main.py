@@ -8,6 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.health import router as health_router
 from app.api.incidents import router as incidents_router
 from app.core.config import get_settings
+from app.investigation.router import router as investigations_router
+from app.remediation.router import router as remediation_router
 
 
 @asynccontextmanager
@@ -64,6 +66,8 @@ def create_application() -> FastAPI:
     # Register API routers
     application.include_router(health_router)
     application.include_router(incidents_router)
+    application.include_router(investigations_router)
+    application.include_router(remediation_router)
 
     @application.get(
         "/",
