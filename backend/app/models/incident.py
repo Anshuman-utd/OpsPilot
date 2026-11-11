@@ -1,7 +1,10 @@
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.investigation.models import InvestigationModel
 
 from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -100,6 +103,14 @@ class IncidentModel(Base):
         back_populates="incident",
         cascade="all, delete-orphan",
         order_by="IncidentEventModel.created_at.asc()",
+    )
+
+    # Autonomous investigations
+    investigations: Mapped[list["InvestigationModel"]] = relationship(
+        back_populates="incident",
+        cascade="all, delete-orphan",
+        order_by="InvestigationModel.created_at.desc()",
+        lazy="selectin",
     )
 
     __table_args__ = (
