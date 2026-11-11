@@ -10,6 +10,11 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
 from app.core.database import get_session_factory
+from app.remediation.distributed_lock import (
+    LostLockError,
+    RedisUnavailableError,
+    RemediationDistributedLock,
+)
 from app.remediation.models import (
     ActionStatus,
     ExecutionStatus,
@@ -27,9 +32,6 @@ from app.remediation.registry import ActionRegistry, action_registry
 
 logger = logging.getLogger("opspilot.remediation.executor")
 
-# In-memory lock fallback for environments without live Redis
-_in_memory_locks: dict[str, float] = {}
-
 
 class RemediationExecutor:
     """Safely executes approved remediation actions within controlled boundaries."""
@@ -38,41 +40,12 @@ class RemediationExecutor:
         self,
         registry: ActionRegistry | None = None,
         policy_engine: SafetyPolicyEngine | None = None,
+        redis_client: Any | None = None,
     ) -> None:
         self.registry = registry or action_registry
         self.policy = policy_engine or safety_policy_engine
+        self.redis_client = redis_client
         self.settings = get_settings()
-
-    async def _acquire_lock(self, lock_key: str, ttl_seconds: float = 30.0) -> bool:
-        """Acquire distributed lock using Redis, falling back to in-memory lock."""
-        now = time.time()
-        # Try in-memory check first to guard against concurrent local tasks
-        if lock_key in _in_memory_locks:
-            if _in_memory_locks[lock_key] > now:
-                return False
-            del _in_memory_locks[lock_key]
-
-        try:
-            from app.core.redis import get_redis
-            redis = await get_redis()
-            acquired = await redis.set(lock_key, "locked", nx=True, ex=int(ttl_seconds))
-            if not acquired:
-                return False
-        except Exception as exc:
-            logger.debug("Redis lock acquisition unavailable (%s); using in-memory lock", exc)
-
-        _in_memory_locks[lock_key] = now + ttl_seconds
-        return True
-
-    async def _release_lock(self, lock_key: str) -> None:
-        """Release distributed lock safely."""
-        _in_memory_locks.pop(lock_key, None)
-        try:
-            from app.core.redis import get_redis
-            redis = await get_redis()
-            await redis.delete(lock_key)
-        except Exception:
-            pass
 
     async def execute_action(
         self,
@@ -148,11 +121,59 @@ class RemediationExecutor:
                 return {"status": "policy_rejected", "reasons": readiness.failure_reasons}
 
         # 4. Acquire Distributed Lock for Target Service
-        lock_key = f"lock:remediation:{action.target_service}"
-        locked = await self._acquire_lock(lock_key, ttl_seconds=self.settings.REMEDIATION_EXECUTION_TIMEOUT_SECONDS + 10.0)
+        try:
+            lock = RemediationDistributedLock(
+                service_name=action.target_service,
+                ttl_seconds=self.settings.REMEDIATION_EXECUTION_TIMEOUT_SECONDS + 10.0,
+                redis_client=self.redis_client,
+            )
+        except ValueError as err:
+            logger.error("Service allowlist rejection for lock: %s", err)
+            return {"status": "error", "error": str(err)}
+
+        try:
+            locked = await lock.acquire()
+        except RedisUnavailableError as exc:
+            logger.error(
+                "Redis unavailable during lock acquisition for service '%s': %s. Failing closed.",
+                action.target_service,
+                exc,
+            )
+            async with factory() as db:
+                stmt = select(RemediationExecutionModel).where(RemediationExecutionModel.id == execution_id)
+                e_rec = (await db.execute(stmt)).scalar_one_or_none()
+                if e_rec:
+                    e_rec.status = ExecutionStatus.FAILED.value
+                    e_rec.error_message = f"Redis lock infrastructure failure: {exc}"
+                    audit = RemediationAuditEventModel(
+                        incident_id=plan.incident_id,
+                        investigation_id=plan.investigation_id,
+                        plan_id=plan.id,
+                        action_id=action.id,
+                        execution_id=execution.id,
+                        event_type=RemediationAuditEventType.EXECUTION_FAILED.value,
+                        actor="executor",
+                        details={"error": str(exc), "stage": "lock_acquisition"},
+                    )
+                    db.add(audit)
+                    await db.commit()
+
+            return {
+                "status": "redis_unavailable",
+                "error": f"Redis infrastructure failure during lock acquisition: {exc}",
+                "service": action.target_service,
+            }
+
         if not locked:
-            logger.warning("Could not acquire lock for service '%s'; action '%s' is locked", action.target_service, action.id)
-            return {"status": "locked", "message": f"Service '{action.target_service}' is currently locked by another operation"}
+            logger.warning(
+                "Could not acquire lock for service '%s'; action '%s' is locked due to contention",
+                action.target_service,
+                action.id,
+            )
+            return {
+                "status": "locked",
+                "message": f"Service '{action.target_service}' is currently locked by another operation",
+            }
 
         start_time = time.time()
         start_dt = datetime.now(UTC)
@@ -191,8 +212,24 @@ class RemediationExecutor:
             if not action_def:
                 raise ValueError(f"Action type '{action.action_type}' is not registered.")
 
+            # Immediate lease ownership check before executing outbound network side effects
+            if not await lock.validate_ownership():
+                logger.error(
+                    "Lock ownership lost for service '%s' (execution %s) prior to handler dispatch!",
+                    action.target_service,
+                    execution_id,
+                )
+                raise LostLockError(
+                    f"Lost lock lease ownership for service '{action.target_service}' prior to handler dispatch"
+                )
+
             handler_timeout = min(action_def.timeout_seconds, self.settings.REMEDIATION_EXECUTION_TIMEOUT_SECONDS)
-            logger.info("Executing handler for action '%s' on '%s' (timeout: %.1fs)", action.action_type, action.target_service, handler_timeout)
+            logger.info(
+                "Executing handler for action '%s' on '%s' (timeout: %.1fs)",
+                action.action_type,
+                action.target_service,
+                handler_timeout,
+            )
 
             execution_output = await action_def.handler(
                 action.target_service,
@@ -297,8 +334,11 @@ class RemediationExecutor:
             return {"status": "failed", "error": str(exc), "duration_ms": duration_ms}
 
         finally:
-            # 9. Always safely release distributed lock
-            await self._release_lock(lock_key)
+            # 9. Always safely release distributed lock via atomic Lua
+            try:
+                await lock.release()
+            except Exception as rel_err:
+                logger.warning("Error releasing lock for service '%s': %s", action.target_service, rel_err)
 
 
 # Global singleton executor

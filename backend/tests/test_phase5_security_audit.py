@@ -162,63 +162,83 @@ def test_audit_4_fault_type_path_traversal_blocked_by_allowlist():
         assert "Invalid fault_type" in str(exc.value)
 
 
-def test_audit_5_redis_import_error_causes_silent_in_memory_fallback():
-    """Verify that executor._acquire_lock tries to import non-existent 'get_redis', always falling back to in-memory lock."""
+@pytest.mark.asyncio
+async def test_audit_5_redis_import_error_causes_silent_in_memory_fallback():
+    """Verify that Checkpoint 1 eliminates the broken import and completely removes in-memory fallback.
+
+    Original Finding A & E:
+    executor imported 'get_redis' which raised ImportError and silently used _in_memory_locks.
+
+    Remediated Invariant:
+    _in_memory_locks is completely removed from app.remediation.executor.
+    Distributed lock uses get_redis_client and fails closed on Redis connection failure.
+    """
     import app.core.redis as redis_mod
-    # Verify that get_redis does not exist in app.core.redis
-    assert not hasattr(redis_mod, "get_redis")
+    import app.remediation.executor as exec_mod
+    from app.remediation.distributed_lock import RedisUnavailableError, RemediationDistributedLock
+    from tests.fake_redis import FakeRedis
+
+    # 1. Verify get_redis_client exists in app.core.redis
     assert hasattr(redis_mod, "get_redis_client")
 
-    # When _acquire_lock runs, it catches ImportError and falls back to process-local in-memory lock
-    executor = RemediationExecutor()
-    lock_key = "lock:remediation:test-audit-service"
-    from app.remediation.executor import _in_memory_locks
-    _in_memory_locks.clear()
+    # 2. Verify _in_memory_locks was completely removed from executor module
+    assert not hasattr(exec_mod, "_in_memory_locks")
+    assert not hasattr(exec_mod.RemediationExecutor, "_acquire_lock")
 
-    try:
-        # Acquiring lock succeeds only via in-memory dictionary
-        res = asyncio.run(executor._acquire_lock(lock_key, ttl_seconds=1.0))
-        assert res is True
-        assert lock_key in _in_memory_locks  # Confirms in-memory fallback was used!
-    finally:
-        _in_memory_locks.clear()
+    # 3. Verify RemediationDistributedLock fails closed when Redis is unavailable
+    broken_redis = FakeRedis()
+    broken_redis.should_fail = True
+    lock = RemediationDistributedLock("payment-service", redis_client=broken_redis)
+
+    with pytest.raises(RedisUnavailableError) as exc_info:
+        await lock.acquire()
+
+    assert "Redis unavailable" in str(exc_info.value)
+    assert not lock.is_owned
 
 
 @pytest.mark.asyncio
 async def test_audit_5_lock_release_unconditional_delete_deletes_other_worker_lock():
-    """Verify that if Redis locking were called, unconditional delete deletes another worker's lock if expired."""
-    fake_redis_store = {}
+    """Verify that atomic Lua compare-and-delete prevents a stale/expired worker from deleting a successor's lock.
 
-    class MockRedis:
-        async def set(self, key, value, nx=False, ex=None):
-            if nx and key in fake_redis_store:
-                return False
-            fake_redis_store[key] = value
-            return True
+    Original Finding B & C:
+    Static lock string 'locked' + unconditional redis.delete allowed expired Worker 1 to delete Worker 2's lock.
 
-        async def delete(self, key):
-            fake_redis_store.pop(key, None)
+    Remediated Invariant:
+    Lock tokens are unique UUIDs.
+    Release executes Lua compare-and-delete: Worker 1 cannot delete Worker 2's lock.
+    """
+    from app.remediation.distributed_lock import RemediationDistributedLock
+    from tests.fake_redis import FakeRedis
 
-    mock_redis = MockRedis()
-    lock_key = "lock:remediation:payment-service"
+    fake_redis = FakeRedis()
 
-    # Simulate what _acquire_lock and _release_lock would do with a Redis client:
-    # 1. Worker 1 acquires lock
-    await mock_redis.set(lock_key, "locked", nx=True, ex=1)
-    assert fake_redis_store[lock_key] == "locked"  # Stored static string, not unique token
+    # 1. Worker 1 acquires lock on payment-service
+    worker1_lock = RemediationDistributedLock("payment-service", ttl_seconds=1.0, redis_client=fake_redis)
+    acq1 = await worker1_lock.acquire()
+    assert acq1 is True
+    assert worker1_lock.is_owned
+    token1 = worker1_lock.ownership_token
 
-    # 2. Worker 1's lock expires in Redis (simulated TTL expiry)
-    fake_redis_store.pop(lock_key)
+    # 2. Simulate Worker 1's lock expiring (clock advances past TTL)
+    fake_redis.advance_time(2.0)
 
     # 3. Worker 2 acquires lock on the same service
-    await mock_redis.set(lock_key, "locked", nx=True, ex=10)
-    assert fake_redis_store[lock_key] == "locked"  # Worker 2 now owns lock
+    worker2_lock = RemediationDistributedLock("payment-service", ttl_seconds=10.0, redis_client=fake_redis)
+    acq2 = await worker2_lock.acquire()
+    assert acq2 is True
+    assert worker2_lock.is_owned
+    token2 = worker2_lock.ownership_token
+    assert token1 != token2  # Unique cryptographic ownership tokens!
 
-    # 4. Worker 1 finishes late and releases lock unconditionally
-    await mock_redis.delete(lock_key)
+    # 4. Worker 1 finishes late and attempts to release
+    rel1 = await worker1_lock.release()
+    # Release returned False because the token in Redis does not match Worker 1's token!
+    assert rel1 is False
 
-    # 5. Worker 1 has DELETED Worker 2's active lock!
-    assert lock_key not in fake_redis_store
+    # 5. Worker 2's lock was NOT deleted by Worker 1
+    assert await fake_redis.get("lock:remediation:payment-service") == token2
+    assert await worker2_lock.validate_ownership() is True
 
 
 @pytest.mark.asyncio

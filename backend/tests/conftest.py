@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core.database import Base
 from app.main import app
+from tests.fake_redis import FakeRedis
 
 
 @pytest.fixture
@@ -27,3 +28,15 @@ async def sqlite_session() -> AsyncGenerator[AsyncSession, None]:
     async with session_factory() as session:
         yield session
     await engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def fake_redis_remediation(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> FakeRedis | None:
+    """Provide isolated FakeRedis client for remediation distributed locking tests unless marked live_redis."""
+    if "live_redis" in request.keywords:
+        return None
+    fake = FakeRedis()
+    monkeypatch.setattr("app.remediation.distributed_lock.get_redis_client", lambda: fake)
+    return fake
