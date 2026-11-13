@@ -2,6 +2,8 @@
 
 The release CI smoke test uses real PostgreSQL, Redis, Celery, Prometheus, Loki, Tempo, and the sample application. It tests signup and viewer restrictions, detection of payment declines, investigation, operator approval, recovery, report download, and sign-out.
 
+The [release benchmark run](https://github.com/Anshuman-utd/OpsPilot/actions/runs/43420030197) verified detection, investigation, operator-approved execution, recovery, and report download for all six scenarios. The run includes a JSON artifact for each scenario.
+
 ## Local observations
 
 These are individual runs from the November 2026 release work. The benchmarks used the deterministic RCA path and each started with zero active incidents.
@@ -11,6 +13,7 @@ These are individual runs from the November 2026 release work. The benchmarks us
 | Payment declines | 18.83 s | 108.84 s | Yes |
 | Order database contention | 18.07 s | 63.99 s | Yes |
 | Payment endpoint unavailable | 16.00 s | 152.82 s | Yes |
+| Slow payments | 17.13 s | 162.76 s | Yes |
 
 The payment endpoint run identified elevated HTTP 5xx responses and missed the scenario's specific RCA keyword check. A subsequent regression test verifies that the fallback cites the sample service's unavailability log. The fallback also distinguishes latency evidence from payment failures. These observations come from individual runs during development. Repeated runs are needed to measure mean recovery times and accuracy.
 
