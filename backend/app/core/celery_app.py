@@ -10,6 +10,7 @@ celery_app = Celery(
     backend=settings.REDIS_URL,
     include=[
         "app.workers.detection_tasks",
+        "app.workers.demo_tasks",
         "app.workers.investigation_tasks",
         "app.workers.remediation_tasks",
         "app.workers.recovery_tasks",

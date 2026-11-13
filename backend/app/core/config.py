@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     PUBLIC_ORIGIN: str = "http://localhost:3000"
     SESSION_HOURS: int = Field(default=12, ge=1, le=168)
     DEMO_ORDERS_ENABLED: bool = False
+    DEMO_LAB_ENABLED: bool = False
 
     # PostgreSQL async connection URL
     DATABASE_URL: str = "postgresql+asyncpg://opspilot:opspilot_dev@localhost:5433/opspilot"
@@ -88,6 +89,10 @@ class Settings(BaseSettings):
     @property
     def auth_required(self) -> bool:
         return self.AUTH_REQUIRED or self.APP_ENV == "production"
+
+    @property
+    def demo_lab_enabled(self) -> bool:
+        return self.auth_required and self.DEMO_LAB_ENABLED and self.REMEDIATION_ENABLED
 
     @property
     def secure_session_cookie(self) -> bool:

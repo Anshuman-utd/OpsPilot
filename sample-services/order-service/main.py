@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 import time
@@ -23,6 +24,7 @@ from common.metrics import (
     ORDERS_CREATED_TOTAL,
     PrometheusMiddleware,
     metrics_endpoint,
+    record_pool_metrics,
 )
 from common.schemas import OrderCreateRequest, OrderResponse, ServiceHealthResponse
 from common.telemetry import setup_telemetry
@@ -118,6 +120,7 @@ def create_app() -> FastAPI:
 
     @app.get("/metrics", include_in_schema=False)
     async def metrics():
+        record_pool_metrics(SERVICE_NAME)
         return metrics_endpoint()
 
     @app.get("/health", response_model=ServiceHealthResponse, tags=["Health"])
@@ -154,7 +157,8 @@ def create_app() -> FastAPI:
             params = fault_manager.get_params("db_pool_exhaustion")
             hold_sec = min(float(params.get("hold_seconds", 3.0)), 15.0)
             logger.warning("Simulating db_pool_exhaustion: holding connection for %.1fs", hold_sec)
-            time.sleep(hold_sec)  # Synchronous hold blocking pool worker
+            await db.connection()
+            await asyncio.sleep(hold_sec)
 
         # 3. Persist initial order in PENDING status
         order_id = str(uuid.uuid4())

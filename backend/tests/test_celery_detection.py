@@ -47,6 +47,7 @@ def test_cli_app_loads_tasks_and_periodic_schedule():
     worker_tasks = {task for task in celery_app.tasks if task.startswith("app.workers.")}
     assert worker_tasks == {
         "app.workers.detection_tasks.run_detection_cycle",
+        "app.workers.demo_tasks.run_demo_scenario",
         "app.workers.investigation_tasks.run_investigation_task",
         "app.workers.remediation_tasks.run_remediation_execution_task",
         "app.workers.remediation_tasks.run_remediation_verification_task",

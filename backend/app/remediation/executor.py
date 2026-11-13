@@ -6,6 +6,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -344,6 +345,11 @@ class RemediationExecutor:
 
         except Exception as exc:
             duration_ms = (time.time() - start_time) * 1000.0
+            unknown_outcome = isinstance(exc, (TimeoutError, httpx.TimeoutException, httpx.TransportError))
+            error_message = (
+                "The service outcome is unknown after a transport failure. Check the target before trying again."
+                if unknown_outcome else str(exc)
+            )
             logger.error("Execution %s failed: %s", execution_id, exc, exc_info=True)
 
             async with factory() as db:
@@ -352,7 +358,7 @@ class RemediationExecutor:
                 e_record.status = ExecutionStatus.FAILED.value
                 e_record.completed_at = datetime.now(UTC)
                 e_record.duration_ms = duration_ms
-                e_record.error_message = str(exc)
+                e_record.error_message = error_message
 
                 act_stmt = select(RemediationActionModel).where(RemediationActionModel.id == action.id)
                 act_record = (await db.execute(act_stmt)).scalar_one()
@@ -370,12 +376,12 @@ class RemediationExecutor:
                     execution_id=execution.id,
                     event_type=RemediationAuditEventType.EXECUTION_FAILED.value,
                     actor="executor",
-                    details={"error": str(exc), "duration_ms": duration_ms},
+                    details={"error": error_message, "duration_ms": duration_ms, "outcome": "unknown" if unknown_outcome else "failed"},
                 )
                 db.add(audit)
                 await db.commit()
 
-            return {"status": "failed", "error": str(exc), "duration_ms": duration_ms}
+            return {"status": "failed", "error": error_message, "duration_ms": duration_ms}
 
         finally:
             # 9. Always safely release distributed lock via atomic Lua

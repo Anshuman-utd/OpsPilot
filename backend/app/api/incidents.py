@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -41,6 +41,7 @@ async def list_incidents(
     severity: Annotated[str | None, Query()] = None,
     service: Annotated[str | None, Query()] = None,
     incident_type: Annotated[str | None, Query()] = None,
+    search: Annotated[str | None, Query(max_length=100)] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
     sort_by: Annotated[str, Query()] = "created_at",
@@ -87,6 +88,13 @@ async def list_incidents(
     if incident_type:
         query = query.where(IncidentModel.incident_type == incident_type)
 
+    if search and (term := search.strip()):
+        query = query.where(or_(
+            IncidentModel.title.icontains(term, autoescape=True),
+            IncidentModel.service_name.icontains(term, autoescape=True),
+            IncidentModel.id == term,
+        ))
+
     # Sorting
     allowed_sort_fields = {
         "created_at",
@@ -99,9 +107,9 @@ async def list_incidents(
     sort_field = sort_by if sort_by in allowed_sort_fields else "created_at"
     sort_column = getattr(IncidentModel, sort_field, IncidentModel.created_at)
     if order.lower() == "asc":
-        query = query.order_by(sort_column.asc())
+        query = query.order_by(sort_column.asc(), IncidentModel.id.asc())
     else:
-        query = query.order_by(sort_column.desc())
+        query = query.order_by(sort_column.desc(), IncidentModel.id.desc())
 
     query = query.offset(offset).limit(limit)
 

@@ -35,6 +35,7 @@ class RemediationActionResponse(BaseModel):
 
     id: str
     plan_id: str
+    content_hash: str
     action_type: str
     target_service: str
     environment: str
@@ -189,6 +190,7 @@ class RemediationApprovalRequest(BaseModel):
     approver_id: str = Field(default="operator", description="Operator identity or username")
     comment: str | None = Field(default=None, description="Optional approval justification or notes")
     plan_version: int = Field(default=1, description="Immutable plan version being approved")
+    action_content_hash: str | None = Field(default=None, pattern="^[a-f0-9]{64}$")
 
 
 class RemediationRejectionRequest(BaseModel):

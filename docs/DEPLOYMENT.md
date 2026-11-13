@@ -1,61 +1,64 @@
-# Deploy OpsPilot
+# Deploy OpsPilot without AWS
 
-The first release targets a single Linux host with Docker Engine, Compose 2.24.4 or newer, and a DNS name. Caddy serves the dashboard and API from one origin and manages HTTPS for the configured domain. The Compose release gives the database, broker, demo services, and telemetry stack private container networking. Alloy reads rotated service logs from a shared volume.
+Run the Next.js frontend, FastAPI backend, Celery, and the telemetry stack on **one Linux VM**. A DigitalOcean Droplet, Hetzner Cloud server, or an existing Ubuntu host can run the same Compose release. Start with 4 vCPUs, 8 GB RAM, and at least 40 GB of disk for the full stack and on-host image builds. Measure usage before sizing for additional traffic.
 
-## Install
+Caddy sends page requests to Next.js and `/api/*` requests to FastAPI on the same domain. PostgreSQL, Redis, the demo services, and the observability tools use private container networking. The frontend uses relative API URLs, so a separate frontend hosting account and cross-origin cookie configuration are unnecessary.
 
-1. Point your DNS record at the server and allow TCP 80 and 443 through its firewall.
-2. Clone the repository. From the repository root, prepare the deployment environment.
+## Run locally
 
-   ```sh
-   umask 077
-   cp deploy/release.env.example .env.release
-   chmod 600 .env.release
-   ```
-
-3. Edit `.env.release`. Set `OPSPILOT_ORIGIN` to your HTTPS origin and generate three distinct database and Grafana passwords using `openssl rand -hex 24`. Hex values can be embedded directly in the internal database connection URLs. The production configuration requires an HTTPS origin.
-4. Build and start the stack, then provision your first named operator. The migration service runs before the API starts. Use the same project name and environment file for subsequent commands.
-
-   ```sh
-   docker compose --env-file .env.release -p opspilot-release \
-     -f docker-compose.yml -f compose.release.yml up -d --build --wait
-
-   docker compose --env-file .env.release -p opspilot-release \
-     -f docker-compose.yml -f compose.release.yml exec api \
-     python -m app.accounts alice --role operator
-   ```
-
-5. Open the configured HTTPS origin and sign in. Check **System health** and **Services**. Use the same account command with `--role viewer` to provision read-only access. The command prompts for passwords and accepts `--disable` to revoke an account and its sessions. Re-running it with a new password also revokes existing sessions.
-
-The public endpoints are the workspace and a minimal liveness probe. Incident data, telemetry summaries, and mutations use authenticated sessions. Operators can write and viewers can read. Fault injection and automated remediation are off in the release defaults. Enable them only in an isolated demo deployment. The release uses Docker Compose to run FastAPI, PostgreSQL, Redis, and Celery together.
-
-## Local authenticated preview
-
-Use a separate project name and fresh volumes. In a copy of the release environment, set these values alongside the three generated passwords.
-
-```dotenv
-OPSPILOT_ENV=development
-OPSPILOT_ORIGIN=http://localhost:8088
-EDGE_SITE_ADDRESS=http://localhost
-EDGE_HTTP_BIND=127.0.0.1:8088
-EDGE_HTTPS_BIND=127.0.0.1:8448
-```
-
-Run the same Compose and account commands with that environment file, then visit `http://localhost:8088`. To run the full smoke test on a disposable instance, set `FAULT_INJECTION_ENABLED=true` and pipe `deploy/smoke.py` into `docker compose … exec -T api python -`. The test creates synthetic orders, an operator account, and incident records.
-
-For the existing local preview, create your account with:
+With Docker Desktop running, open a terminal at the repo root:
 
 ```sh
+./deploy/init-env.sh local
+
+docker compose --env-file .env.preview -p opspilot-release \
+  -f docker-compose.yml -f compose.release.yml up -d --build --wait
+
 docker compose --env-file .env.preview -p opspilot-release \
   -f docker-compose.yml -f compose.release.yml exec api \
-  python -m app.accounts operator --role operator
+  python -m app.accounts --invite --role operator
 ```
 
-## Operate and upgrade
+Open [http://localhost:8088](http://localhost:8088), choose **Create an account**, paste the one-time code, and set your username and password. Existing operators can sign in with their existing credentials. Passwords need at least 12 characters. In **Team access**, an operator can generate viewer signup codes to share privately. Each code expires after 24 hours and can be used once. Signup grants the role attached to the invite.
 
-- Back up both PostgreSQL databases and store a copy away from the host. For example, `docker compose … exec -T postgres pg_dump -U opspilot -Fc opspilot > opspilot.dump` creates a platform dump with the default database name. Repeat for the demo database with its configured credentials and test restoration.
-- Before upgrading, take a fresh backup. Rebuild with the same Compose project and environment file. Inspect `docker compose … logs migrate` and run `docker compose … exec -T api alembic check`. Use database backups for rollbacks that include incompatible migrations.
-- Inspect worker and Beat logs if incidents stop updating. The worker periodically requeues old pending work and resumes stalled verification. An action interrupted during dispatch is marked failed with an unknown outcome. Inspect the demo service before proposing another action.
-- Plan monitoring and disk capacity for PostgreSQL, Redis, and telemetry data. The single-host release has one instance of each backing service and local volumes.
+For an existing local install, add `DEMO_LAB_ENABLED=true` to `.env.preview` alongside `FAULT_INJECTION_ENABLED=true` and rerun Compose. The initializer preserves existing credentials and settings. The lab sends synthetic orders through the local demo services.
 
-References [Docker Compose overrides](https://docs.docker.com/reference/compose-file/merge/) · [Caddy reverse proxy](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy)
+## Deploy on a DigitalOcean Droplet or Hetzner VM
+
+1. **Create an Ubuntu server.** Add your SSH public key during provisioning. Use an SSH-enabled administrative user. Configure the cloud firewall to allow TCP 80 and 443 from the internet and SSH from your IP. Avoid publishing any additional Compose ports. [DigitalOcean Docker image](https://docs.digitalocean.com/products/marketplace/catalog/docker/) · [Hetzner server setup](https://docs.hetzner.com/cloud/servers/getting-started/creating-a-server/)
+2. **Install Docker and Compose.** Use the provider’s Docker image or install Docker Engine and the Compose plugin on Ubuntu. Verify `docker compose version` reports 2.24.4 or later. Install Git and OpenSSL if your image omits them. [Docker Ubuntu installation](https://docs.docker.com/engine/install/ubuntu/)
+3. **Point your domain at the server.** Create an A record such as `ops.example.com` with the server’s public IPv4 address. Add an AAAA record only if IPv6 works on your host. Caddy uses the hostname and reachable ports to obtain and renew certificates. [Caddy HTTPS setup](https://caddyserver.com/docs/quick-starts/https)
+4. **Clone the app and start it.** Run these on the VM from the release checkout. Use the branch or tag containing the release files.
+
+   ```sh
+   git clone https://github.com/Anshuman-utd/OpsPilot.git
+   cd OpsPilot
+   git switch codex/opspilot-first-release
+   ./deploy/init-env.sh production https://ops.example.com
+
+   docker compose --env-file .env.release -p opspilot-release \
+     -f docker-compose.yml -f compose.release.yml up -d --build --wait
+   ```
+
+   The initializer creates private database and Grafana secrets in `.env.release`. Keep the file backed up and outside source control. Set `GROQ_API_KEY` there only if you want Groq-backed RCA. The default investigation path uses deterministic RCA.
+5. **Create the first account.** Generate an operator invite from the server and use it on your site’s signup form. Viewers can then join using codes from Team access.
+
+   ```sh
+   docker compose --env-file .env.release -p opspilot-release \
+     -f docker-compose.yml -f compose.release.yml exec api \
+     python -m app.accounts --invite --role operator
+
+   curl -fsS https://ops.example.com/health/live
+   ```
+
+6. **Check the installation.** Sign in, open **System health** and **Services**, and confirm the API, PostgreSQL, Redis, and sample services are available. Use `docker compose … logs edge api worker beat` to diagnose startup failures. Replace the ellipsis with the same environment, project, and file arguments from step 4.
+
+The production defaults keep fault injection, demo traffic, and the lab disabled. To host an interactive portfolio demo, use a separate instance with synthetic data and enable `FAULT_INJECTION_ENABLED`, `DEMO_ORDERS_ENABLED`, and `DEMO_LAB_ENABLED`. Invite viewers to inspect the demo and give operator invites only to people who should be able to launch faults and approve actions.
+
+## Operate the release
+
+- **Manage accounts.** On the host, `python -m app.accounts USER --role operator` through the API container creates or resets a named account and revokes its existing sessions. Use `--disable` to disable an account and revoke sessions. A role change also requires a new password through this command.
+- **Back up before upgrading.** Export both PostgreSQL databases and store copies off-host. For the default platform database, use `docker compose … exec -T postgres pg_dump -U opspilot -Fc opspilot > opspilot.dump`. Repeat for `demo-postgres` with its configured username and database. Test restoration before relying on a backup.
+- **Upgrade.** Pull the release branch, rebuild with the same project name and environment, and run `docker compose … exec -T api alembic check`. Inspect the migration and worker logs. Keep the existing volumes and credentials when rebuilding.
+- **Investigate a failed action.** If the execution says its outcome is unknown, inspect the target before approving a new plan. The worker reconciles pending jobs and resumes verification without replaying interrupted dispatches.
+- **Know the operating limits.** This release uses one host and local volumes. It monitors the included sample application and executes allowlisted demo controls. External production infrastructure needs service-specific integrations and permissions. Public hosting requires a server and DNS under your control.

@@ -66,12 +66,20 @@ class RecoveryVerificationEngine:
             if res.success and res.series and all(math.isfinite(series.latest_value) for series in res.series):
                 observed_value = max(series.latest_value for series in res.series)
             details.update(query=res.query, series_count=len(res.series))
+            # In the deployed workspace, a good incident metric also requires a healthy scrape target.
+            if self.settings.auth_required and observed_value is not None:
+                target = await self.prometheus.client.query_instant(f'up{{service="{service_name}"}}')
+                details["target_up"] = (
+                    all(sample.value == 1.0 for sample in target.samples)
+                    if target.success and target.samples else None
+                )
         except Exception as exc:
             logger.warning("Telemetry evaluation failed for %s (%s): %s", service_name, target_metric, exc)
             details["error"] = str(exc)
 
-        telemetry_available = observed_value is not None
-        healthy = observed_value is not None and observed_value <= threshold
+        target_up = details.get("target_up", not self.settings.auth_required)
+        telemetry_available = observed_value is not None and target_up is not None
+        healthy = telemetry_available and bool(target_up) and observed_value is not None and observed_value <= threshold
         observation = {
             "timestamp": datetime.now(UTC).isoformat(),
             "telemetry_available": telemetry_available,

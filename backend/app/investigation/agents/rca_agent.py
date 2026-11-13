@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from typing import Any
 
 from app.core.config import get_settings
@@ -62,9 +63,17 @@ def _deterministic_heuristic_rca(
 
     # Check for specific evidence types
     has_db_issue = any("Database connection pool" in f for f in observed_facts)
-    has_payment_issue = any(
-        "Payment failure" in f or "payment" in f.lower() for f in observed_facts
-    )
+    has_payment_failures = any(f.startswith("Payment failure ratio reached") for f in observed_facts)
+    latency_ids = [
+        e["evidence_id"] for e in evidence_refs
+        if e.get("source_type") == "METRIC" and e.get("evidence_strength") == "SUPPORTING"
+        and "latency" in e.get("observation", "").lower()
+    ]
+    unavailable_ids = [
+        e["evidence_id"] for e in evidence_refs
+        if e.get("source_type") == "LOG"
+        and re.search(r"\bpayment (?:processing )?service unavailable\b", e.get("observation", ""), re.IGNORECASE)
+    ]
 
     metric_ev_ids = [e["evidence_id"] for e in evidence_refs if e.get("source_type") == "METRIC"]
     log_ev_ids = [e["evidence_id"] for e in evidence_refs if e.get("source_type") == "LOG"]
@@ -77,7 +86,7 @@ def _deterministic_heuristic_rca(
                 title=f"Database connection pool exhaustion on {service}",
                 explanation=(
                     f"Active checked-out connections in {service} exceeded safe operating limits, "
-                    "causing subsequent API requests to block and time out."
+                    "which could explain slow requests and timeouts."
                 ),
                 confidence=ConfidenceLevel.HIGH if log_ev_ids else ConfidenceLevel.MEDIUM,
                 confidence_score=0.85 if log_ev_ids else 0.70,
@@ -90,23 +99,49 @@ def _deterministic_heuristic_rca(
             )
         )
 
-    if has_payment_issue:
+    if unavailable_ids:
         hypotheses.append(
             Hypothesis(
-                hypothesis_id=f"HYP-0{len(hypotheses) + 1}",
-                title="Downstream payment gateway decline or network timeout",
+                hypothesis_id=f"HYP-{len(hypotheses) + 1:02d}",
+                title="Payment service reported unavailability",
+                explanation="The application logs report payment service unavailability during the incident.",
+                confidence=ConfidenceLevel.MEDIUM,
+                supporting_evidence_ids=unavailable_ids,
+                affected_components=[service],
+                missing_information=["Reason for the service returning unavailable responses"],
+            )
+        )
+
+    if latency_ids:
+        hypotheses.append(
+            Hypothesis(
+                hypothesis_id=f"HYP-{len(hypotheses) + 1:02d}",
+                title=f"Elevated request latency on {service}",
                 explanation=(
-                    "Elevated payment transaction failures in payment-service propagated "
-                    f"upstream to {service}, triggering failed operations."
+                    "Measured latency exceeded the investigation threshold. Slow requests can cause "
+                    "timeouts in callers if they exceed the caller's deadline."
+                ),
+                confidence=ConfidenceLevel.MEDIUM,
+                supporting_evidence_ids=latency_ids,
+                affected_components=[service],
+                missing_information=["Request timing breakdown and caller timeout configuration"],
+            )
+        )
+
+    if has_payment_failures:
+        hypotheses.append(
+            Hypothesis(
+                hypothesis_id=f"HYP-{len(hypotheses) + 1:02d}",
+                title="Elevated payment failure rate",
+                explanation=(
+                    "The measured payment failure ratio increased. Failed payments can cause "
+                    "upstream order operations to fail."
                 ),
                 confidence=ConfidenceLevel.HIGH if trace_ev_ids else ConfidenceLevel.MEDIUM,
                 confidence_score=0.85 if trace_ev_ids else 0.70,
                 supporting_evidence_ids=metric_ev_ids + trace_ev_ids,
                 affected_components=[service, "payment-service"],
-                assumptions=[
-                    "External payment gateway experienced elevated decline rate or network latency"
-                ],
-                missing_information=["Third-party payment gateway status dashboard"],
+                missing_information=["Payment failure reasons from application or provider logs"],
             )
         )
 
@@ -158,17 +193,14 @@ def _deterministic_heuristic_rca(
         hypotheses=hypotheses,
         confidence_level=overall_confidence,
         affected_services=[service],
-        contributing_factors=[
-            "Traffic volume fluctuations",
-            "Downstream service response variance",
-        ],
+        contributing_factors=[],
         recommended_next_steps=[
             f"Inspect {service} application logs around trigger time",
             f"Review downstream dependency latencies and connection pool sizing for {service}",
         ],
         evidence_sources=[EvidenceReference(**e) for e in evidence_refs],
         investigation_limitations=[
-            "Deterministic heuristic fallback utilized; live LLM key unconfigured or skipped"
+            "Used deterministic synthesis because the language model was unavailable."
         ],
     )
 
@@ -184,6 +216,7 @@ async def run_rca_agent(
     evidence_refs = state.get("evidence_references", [])
 
     report: FinalRCAReport | None = None
+    synthesis_mode = "llm"
 
     # Try LLM synthesis if available
     try:
@@ -242,9 +275,12 @@ async def run_rca_agent(
             exc,
         )
         report = _deterministic_heuristic_rca(service, observed_facts, evidence_refs, ctx)
+        synthesis_mode = "deterministic"
 
+    synthesis = report.model_dump()
+    synthesis["synthesis_mode"] = synthesis_mode
     return {
         "hypotheses": [h.model_dump() for h in report.hypotheses],
-        "synthesis_result": report.model_dump(),
+        "synthesis_result": synthesis,
         "agent_statuses": {"rca_agent": "COMPLETED"},
     }

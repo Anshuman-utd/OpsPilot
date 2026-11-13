@@ -231,6 +231,53 @@ async def test_rca_agent_prompt_injection_resistance():
     assert any("Inspect application logs" in s for s in synth["recommended_next_steps"])
 
 
+@pytest.mark.asyncio
+async def test_fallback_distinguishes_slow_payments_from_declines():
+    unavailable_provider = AsyncMock()
+    unavailable_provider.invoke_structured.side_effect = TimeoutError
+    fact = "payment-service P95 response latency peaked at 2.5s."
+    evidence = EvidenceReference(
+        evidence_id="EV-METRIC-01",
+        source_type=EvidenceSourceType.METRIC,
+        source_reference="p95 latency",
+        service_name="payment-service",
+        observation=fact,
+        relevance="Response latency exceeded the threshold",
+    )
+    result = await run_rca_agent({
+        "affected_service": "payment-service",
+        "observed_facts": [fact],
+        "evidence_references": [evidence.model_dump()],
+    }, provider=unavailable_provider)
+
+    assert result["synthesis_result"]["synthesis_mode"] == "deterministic"
+    assert len(result["hypotheses"]) == 1
+    hypothesis = result["hypotheses"][0]
+    assert hypothesis["title"] == "Elevated request latency on payment-service"
+    assert hypothesis["supporting_evidence_ids"] == ["EV-METRIC-01"]
+
+
+@pytest.mark.asyncio
+async def test_fallback_cites_payment_unavailability_log():
+    unavailable_provider = AsyncMock()
+    unavailable_provider.invoke_structured.side_effect = TimeoutError
+    evidence = EvidenceReference(
+        evidence_id="EV-LOG-01",
+        source_type=EvidenceSourceType.LOG,
+        source_reference="error logs",
+        service_name="payment-service",
+        observation="Fault triggered: Payment processing service unavailable",
+        relevance="Application reported unavailable response",
+    )
+    result = await run_rca_agent({
+        "affected_service": "payment-service",
+        "evidence_references": [evidence.model_dump()],
+    }, provider=unavailable_provider)
+    hypothesis = result["hypotheses"][0]
+    assert hypothesis["title"] == "Payment service reported unavailability"
+    assert hypothesis["supporting_evidence_ids"] == ["EV-LOG-01"]
+
+
 # =========================================================================
 # 3. Evidence Validator Tests (Audit Section 4 Cases)
 # =========================================================================

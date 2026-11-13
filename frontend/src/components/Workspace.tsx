@@ -8,6 +8,7 @@ export type Identity = {
   authenticated: boolean;
   remediation_enabled: boolean;
   demo_orders_enabled: boolean;
+  demo_lab_enabled: boolean;
 };
 
 export const WorkspaceIdentity = createContext<Identity>({
@@ -16,6 +17,7 @@ export const WorkspaceIdentity = createContext<Identity>({
   authenticated: false,
   remediation_enabled: true,
   demo_orders_enabled: false,
+  demo_lab_enabled: false,
 });
 
 export function useIdentity() {

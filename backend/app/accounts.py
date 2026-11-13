@@ -2,12 +2,11 @@
 
 import argparse
 import asyncio
-import re
 from getpass import getpass
 
 from sqlalchemy import delete
 
-from app.core.auth import password_hash
+from app.core.auth import create_invite, normalize_username, password_hash
 from app.core.database import close_db_engine, get_session_factory
 from app.models.account import Account, AccountSession
 
@@ -34,15 +33,33 @@ async def save_account(username: str, role: str, password: str | None) -> None:
         await close_db_engine()
 
 
+async def invite_account(role: str) -> None:
+    try:
+        async with get_session_factory()() as db:
+            code, expires = await create_invite(db, role, "host-admin")
+            print(f"One-time {role} signup code (expires {expires.isoformat()}): {code}")
+    finally:
+        await close_db_engine()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("username")
+    parser.add_argument("username", nargs="?")
+    parser.add_argument("--invite", action="store_true", help="Create a one-time signup code")
     parser.add_argument("--role", choices=("operator", "viewer"), default="operator")
     parser.add_argument("--disable", action="store_true")
     args = parser.parse_args()
-    username = args.username.strip().lower()
-    if not re.fullmatch(r"[a-z0-9][a-z0-9._@-]{0,63}", username):
-        parser.error("Use a username of up to 64 characters with letters, digits, dots, @, underscores or hyphens.")
+    if args.invite:
+        if args.username or args.disable:
+            parser.error("--invite only accepts --role")
+        asyncio.run(invite_account(args.role))
+        return
+    if args.username is None:
+        parser.error("Provide a username or use --invite")
+    try:
+        username = normalize_username(args.username)
+    except ValueError as exc:
+        parser.error(str(exc))
     password = None
     if not args.disable:
         password = getpass("Password (12 characters minimum): ")

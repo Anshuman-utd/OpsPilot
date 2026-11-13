@@ -6,6 +6,7 @@ import { useEffect, useState, useCallback } from "react";
 export interface RemediationAction {
   id: string;
   plan_id: string;
+  content_hash: string;
   action_type: string;
   target_service: string;
   environment: string;
@@ -36,7 +37,7 @@ export interface VerificationObservation {
   healthy: boolean;
   observed_value: number | null;
   threshold: number | null;
-  details: { metric?: string };
+  details: { metric?: string; target_up?: boolean | null };
 }
 
 export interface RemediationVerificationRun {
@@ -126,6 +127,7 @@ export interface RemediationPlan {
 
 interface RemediationDrawerSectionProps {
   incidentId: string;
+  incidentResolved: boolean;
   investigationId?: string | null;
   apiUrl: string;
   onIncidentResolved?: () => void;
@@ -133,6 +135,7 @@ interface RemediationDrawerSectionProps {
 
 export function RemediationDrawerSection({
   incidentId,
+  incidentResolved,
   investigationId,
   apiUrl,
   onIncidentResolved,
@@ -144,6 +147,7 @@ export function RemediationDrawerSection({
   const [auditEvents, setAuditEvents] = useState<RemediationAuditEvent[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [proposing, setProposing] = useState<boolean>(false);
+  const [cancelling, setCancelling] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Approval modal state
@@ -329,6 +333,7 @@ export function RemediationDrawerSection({
           body: JSON.stringify({
             comment: approvalComment.trim() || "Operator approved remediation action execution",
             plan_version: selectedPlan.version,
+            action_content_hash: approvingAction.content_hash,
           }),
         }
       );
@@ -390,6 +395,25 @@ export function RemediationDrawerSection({
   // Latest execution & verification run
   const activeExecution = selectedPlan?.executions?.[0];
   const activeVerification = activeExecution?.verification_runs?.[0];
+  const canCancel = identity.authenticated && identity.role === "operator" && identity.remediation_enabled &&
+    selectedPlan && ["DRAFT", "PENDING_APPROVAL", "APPROVED"].includes(selectedPlan.status);
+
+  async function cancelPlan() {
+    if (!selectedPlan || !window.confirm("Cancel this plan? Any action still queued will be stopped.")) return;
+    setCancelling(true);
+    setErrorMessage(null);
+    try {
+      const response = await fetch(`${apiUrl}/api/v1/remediation-plans/${selectedPlan.id}/cancel`, { method: "POST" });
+      const result = await response.json();
+      if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : "Could not cancel the plan.");
+      await refreshPlans();
+      await refreshAuditEvents(selectedPlan.id);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Could not cancel the plan.");
+    } finally {
+      setCancelling(false);
+    }
+  }
 
   const getStatusBadge = (status: string) => {
     switch (status) {
@@ -447,7 +471,7 @@ export function RemediationDrawerSection({
 
         <button
           onClick={handleProposePlan}
-          hidden={identity.role !== "operator" || !identity.remediation_enabled}
+          hidden={identity.role !== "operator" || !identity.remediation_enabled || incidentResolved}
           disabled={proposing || selectedPlan?.status === "EXECUTING" || selectedPlan?.status === "VERIFYING"}
           className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-mono font-medium rounded-lg transition-colors shadow-sm flex items-center gap-1.5"
         >
@@ -474,6 +498,13 @@ export function RemediationDrawerSection({
           </button>
         </div>
       )}
+
+      {canCancel && (
+        <button className="secondary-button text-xs" onClick={cancelPlan} disabled={cancelling}>
+          {cancelling ? "Cancelling…" : "Cancel plan"}
+        </button>
+      )}
+      {activeExecution?.error_message && <p className="form-error">{activeExecution.error_message}</p>}
 
       {/* Plan History Selector */}
       {plans.length > 1 && (
@@ -729,7 +760,7 @@ export function RemediationDrawerSection({
                 </div>
 
                 {/* Human Approval Action Buttons */}
-                {identity.role === "operator" && identity.remediation_enabled && act.status === "PENDING_APPROVAL" &&
+                {identity.role === "operator" && identity.remediation_enabled && !incidentResolved && act.status === "PENDING_APPROVAL" &&
                   selectedPlan.status === "PENDING_APPROVAL" && (
                     <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
                       <button
@@ -821,6 +852,7 @@ export function RemediationDrawerSection({
                             <td className="p-2 text-slate-300">{obs.details?.metric ?? "—"}</td>
                             <td className="p-2 font-bold text-white">
                               {obs.observed_value?.toFixed(4) ?? "N/A"}
+                              {obs.details?.target_up === false && <span className="block text-rose-300">Target down</span>}
                             </td>
                             <td className="p-2">
                               {!obs.telemetry_available ? (

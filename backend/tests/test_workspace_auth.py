@@ -63,5 +63,16 @@ async def test_workspace_session_and_roles(monkeypatch, sqlite_session):
             # An operator reaches the resource handler.
             response = await client.post("/api/v1/incidents/missing/acknowledge", headers={"Origin": ORIGIN})
             assert response.status_code == 404
+            invite = await client.post("/api/auth/invites", headers={"Origin": ORIGIN})
+            assert invite.status_code == 201
+            signup = {"username": "new-viewer", "password": PASSWORD, "invite_code": invite.json()["code"]}
+            assert (await client.post("/api/auth/signup", headers={"Origin": "https://other.example"}, json=signup)).status_code == 403
+            duplicate = {**signup, "username": "bob"}
+            assert (await client.post("/api/auth/signup", headers={"Origin": ORIGIN}, json=duplicate)).status_code == 409
+            registered = await client.post("/api/auth/signup", headers={"Origin": ORIGIN}, json=signup)
+            assert registered.status_code == 201
+            assert registered.json()["role"] == "viewer"
+            assert (await client.post("/api/auth/signup", headers={"Origin": ORIGIN}, json=signup)).status_code == 400
+            assert (await client.post("/api/auth/invites", headers={"Origin": ORIGIN})).status_code == 403
     finally:
         get_settings.cache_clear()

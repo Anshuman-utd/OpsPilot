@@ -1,6 +1,6 @@
 # OpsPilot
 
-**Run the authenticated release** with the [deployment guide](docs/DEPLOYMENT.md). The instructions below also cover host-based development.
+**Run the authenticated release locally or on a non-AWS VM** with the [deployment guide](docs/DEPLOYMENT.md). The [user guide](docs/USER_GUIDE.md) walks through signup, the demo lab, incident response, and report export. See the [architecture and security boundaries](docs/ARCHITECTURE.md) and [evaluation guide](docs/EVALUATION.md). The instructions below also cover host-based development.
 
 > **Agentic AI-Powered Site Reliability Engineering (SRE) Platform**
 > Autonomously investigates application incidents, identifies potential root causes, recommends verified remediation, and validates service recovery.

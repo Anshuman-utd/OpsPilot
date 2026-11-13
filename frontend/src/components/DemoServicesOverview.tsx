@@ -56,7 +56,19 @@ export default function DemoServicesOverview() {
   }, []);
 
   return (
-    <section className="service-list" aria-label="Monitored services">
+    <div className="space-y-4">
+      <section className="workspace-panel" aria-label="Service dependencies">
+        <h2>Order request path</h2>
+        <ol className="service-path" aria-label="Request order">
+          {catalog.map((item) => (
+            <li key={item.id}>
+              <strong>{item.label}</strong>
+              <span>{services?.[item.id]?.status ?? "Unknown"}</span>
+            </li>
+          ))}
+        </ol>
+      </section>
+      <section className="service-list" aria-label="Monitored services">
       {error && <p className="form-error" role="alert">{error}</p>}
       {catalog.map((item) => {
         const status = services?.[item.id]?.status;
@@ -78,6 +90,7 @@ export default function DemoServicesOverview() {
           </button>
         </article>
       )}
-    </section>
+      </section>
+    </div>
   );
 }
