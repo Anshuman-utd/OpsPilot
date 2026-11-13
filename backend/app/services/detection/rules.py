@@ -68,7 +68,7 @@ class HighHttp5xxErrorRateRule(BaseDetectionRule):
         super().__init__(
             rule_id="high_http_5xx_rate",
             name="High HTTP 5xx Error Rate",
-            description="HTTP 5xx server error rate exceeds acceptable threshold over 5m window",
+            description="HTTP 5xx server error rate exceeds acceptable threshold over a two-minute window",
             enabled=enabled,
         )
 
@@ -78,8 +78,8 @@ class HighHttp5xxErrorRateRule(BaseDetectionRule):
         if not self.enabled:
             return [], []
 
-        volume_query = "sum by (service) (rate(http_requests_total[5m]))"
-        errors = 'sum by (service) (rate(http_requests_total{status_code=~"5.."}[5m]))'
+        volume_query = "sum by (service) (rate(http_requests_total[2m]))"
+        errors = 'sum by (service) (rate(http_requests_total{status_code=~"5.."}[2m]))'
         query = f"(({errors}) or (0 * ({volume_query}))) / (({volume_query}) > 0)"
 
         ratio_result = await client.query_instant(query)
@@ -139,7 +139,7 @@ class HighHttp5xxErrorRateRule(BaseDetectionRule):
                             "observed_percentage": f"{observed_pct}%",
                             "threshold_percentage": f"{round(crit_t * 100, 2)}%",
                             "request_rate_per_sec": round(total_req_rate, 3),
-                            "window": "5m",
+                            "window": "2m",
                             "service": svc,
                         },
                     )
@@ -167,7 +167,7 @@ class HighHttp5xxErrorRateRule(BaseDetectionRule):
                             "observed_percentage": f"{observed_pct}%",
                             "threshold_percentage": f"{round(high_t * 100, 2)}%",
                             "request_rate_per_sec": round(total_req_rate, 3),
-                            "window": "5m",
+                            "window": "2m",
                             "service": svc,
                         },
                     )
@@ -185,7 +185,7 @@ class HighP95LatencyRule(BaseDetectionRule):
         super().__init__(
             rule_id="high_p95_latency",
             name="High P95 Latency",
-            description="P95 HTTP response latency exceeds SLA target over 5m window",
+            description="P95 HTTP response latency exceeds SLA target over a two-minute window",
             enabled=enabled,
         )
 
@@ -197,7 +197,7 @@ class HighP95LatencyRule(BaseDetectionRule):
 
         query = (
             "histogram_quantile(0.95, sum by (le, service) "
-            "(rate(http_request_duration_seconds_bucket[5m])))"
+            "(rate(http_request_duration_seconds_bucket[2m])))"
         )
         result = await client.query_instant(query)
         if not result.success:
@@ -241,7 +241,7 @@ class HighP95LatencyRule(BaseDetectionRule):
                             "promql": query,
                             "observed_p95_seconds": round(p95_sec, 3),
                             "threshold_seconds": crit_t,
-                            "window": "5m",
+                            "window": "2m",
                             "service": svc,
                         },
                     )
@@ -267,7 +267,7 @@ class HighP95LatencyRule(BaseDetectionRule):
                             "promql": query,
                             "observed_p95_seconds": round(p95_sec, 3),
                             "threshold_seconds": high_t,
-                            "window": "5m",
+                            "window": "2m",
                             "service": svc,
                         },
                     )
@@ -285,7 +285,7 @@ class PaymentFailureSpikeRule(BaseDetectionRule):
         super().__init__(
             rule_id="payment_failure_spike",
             name="Payment Failure Spike",
-            description="Ratio of failed payment transactions exceeds threshold over 5m window",
+            description="Ratio of failed payment transactions exceeds threshold over a two-minute window",
             enabled=enabled,
         )
 
@@ -298,8 +298,8 @@ class PaymentFailureSpikeRule(BaseDetectionRule):
         svc = "payment-service"
         fingerprint = self.generate_fingerprint(svc)
 
-        sample_query = "sum(increase(payments_processed_total[5m]))"
-        failures = 'sum(increase(payments_processed_total{status="FAILED"}[5m]))'
+        sample_query = "sum(increase(payments_processed_total[2m]))"
+        failures = 'sum(increase(payments_processed_total{status="FAILED"}[2m]))'
         query = f"100 * (({failures}) or (0 * ({sample_query}))) / (({sample_query}) > 0)"
 
         ratio_result = await client.query_instant(query)
@@ -342,7 +342,7 @@ class PaymentFailureSpikeRule(BaseDetectionRule):
                     "observed_failure_percentage": round(failure_pct, 2),
                     "threshold_percentage": crit_t,
                     "total_payment_attempts": round(total_samples),
-                    "window": "5m",
+                    "window": "2m",
                     "service": svc,
                 },
             )
@@ -369,7 +369,7 @@ class PaymentFailureSpikeRule(BaseDetectionRule):
                     "observed_failure_percentage": round(failure_pct, 2),
                     "threshold_percentage": high_t,
                     "total_payment_attempts": round(total_samples),
-                    "window": "5m",
+                    "window": "2m",
                     "service": svc,
                 },
             )
