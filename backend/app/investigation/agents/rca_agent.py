@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from typing import Any
 
 from app.core.config import get_settings
@@ -70,7 +71,8 @@ def _deterministic_heuristic_rca(
     ]
     unavailable_ids = [
         e["evidence_id"] for e in evidence_refs
-        if e.get("source_type") == "LOG" and "payment service unavailable" in e.get("observation", "").lower()
+        if e.get("source_type") == "LOG"
+        and re.search(r"\bpayment (?:processing )?service unavailable\b", e.get("observation", ""), re.IGNORECASE)
     ]
 
     metric_ev_ids = [e["evidence_id"] for e in evidence_refs if e.get("source_type") == "METRIC"]

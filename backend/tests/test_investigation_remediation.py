@@ -257,6 +257,27 @@ async def test_fallback_distinguishes_slow_payments_from_declines():
     assert hypothesis["supporting_evidence_ids"] == ["EV-METRIC-01"]
 
 
+@pytest.mark.asyncio
+async def test_fallback_cites_payment_unavailability_log():
+    unavailable_provider = AsyncMock()
+    unavailable_provider.invoke_structured.side_effect = TimeoutError
+    evidence = EvidenceReference(
+        evidence_id="EV-LOG-01",
+        source_type=EvidenceSourceType.LOG,
+        source_reference="error logs",
+        service_name="payment-service",
+        observation="Fault triggered: Payment processing service unavailable",
+        relevance="Application reported unavailable response",
+    )
+    result = await run_rca_agent({
+        "affected_service": "payment-service",
+        "evidence_references": [evidence.model_dump()],
+    }, provider=unavailable_provider)
+    hypothesis = result["hypotheses"][0]
+    assert hypothesis["title"] == "Payment service reported unavailability"
+    assert hypothesis["supporting_evidence_ids"] == ["EV-LOG-01"]
+
+
 # =========================================================================
 # 3. Evidence Validator Tests (Audit Section 4 Cases)
 # =========================================================================
