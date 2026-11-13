@@ -1,6 +1,10 @@
 name: Benchmark demo scenarios
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/benchmark.yml"
+      - "deploy/benchmark.py"
 permissions:
   contents: read
 jobs:
