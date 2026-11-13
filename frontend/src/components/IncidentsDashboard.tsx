@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { useIdentity } from "./Workspace";
 import { RemediationDrawerSection } from "./RemediationDrawerSection";
 
 export interface IncidentEvent {
@@ -125,7 +126,7 @@ export interface Investigation {
   id: string;
   incident_id: string;
   status: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
-  trigger_type: "manual" | "automatic";
+  trigger_type: "MANUAL" | "AUTOMATIC";
   model_provider?: string;
   model_name?: string;
   started_at?: string | null;
@@ -151,6 +152,8 @@ const AGENT_DISPLAY_NAMES: Record<string, string> = {
 };
 
 export default function IncidentsDashboard() {
+  const canOperate = useIdentity().role === "operator";
+  const [actionError, setActionError] = useState("");
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [stats, setStats] = useState<IncidentStats | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -177,7 +180,7 @@ export default function IncidentsDashboard() {
   const [evaluating, setEvaluating] = useState<boolean>(false);
   const [evalResult, setEvalResult] = useState<DetectionRunResult | null>(null);
 
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+  const apiUrl = "";
 
   // Fetch stats and incident list
   const fetchIncidents = useCallback(async () => {
@@ -320,11 +323,12 @@ export default function IncidentsDashboard() {
   const handleStartInvestigation = async () => {
     if (!selectedId) return;
     setStartingInvestigation(true);
+    setActionError("");
     try {
       const res = await fetch(`${apiUrl}/api/v1/incidents/${selectedId}/investigations`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ trigger_type: "manual" }),
+        body: JSON.stringify({ trigger_type: "MANUAL" }),
       });
       if (res.ok) {
         const created: Investigation = await res.json();
@@ -333,10 +337,10 @@ export default function IncidentsDashboard() {
         void fetchIncidents();
       } else {
         const errData = await res.json().catch(() => ({}));
-        alert(`Could not start investigation: ${errData.detail || "Unknown error"}`);
+        setActionError(typeof errData.detail === "string" ? errData.detail : "Could not start the investigation.");
       }
-    } catch (err) {
-      alert(`Error contacting server: ${String(err)}`);
+    } catch {
+      setActionError("Could not reach the workspace.");
     } finally {
       setStartingInvestigation(false);
     }
@@ -346,6 +350,7 @@ export default function IncidentsDashboard() {
   const handleRetryInvestigation = async () => {
     if (!selectedInvestigation) return;
     setStartingInvestigation(true);
+    setActionError("");
     try {
       const res = await fetch(`${apiUrl}/api/v1/investigations/${selectedInvestigation.id}/retry`, {
         method: "POST",
@@ -354,8 +359,8 @@ export default function IncidentsDashboard() {
         const retried: Investigation = await res.json();
         setSelectedInvestigation(retried);
       }
-    } catch (err) {
-      alert(`Retry failed: ${String(err)}`);
+    } catch {
+      setActionError("Could not retry the investigation.");
     } finally {
       setStartingInvestigation(false);
     }
@@ -365,19 +370,23 @@ export default function IncidentsDashboard() {
   const handleAction = async (action: "acknowledge" | "investigate" | "resolve") => {
     if (!selectedId) return;
     setActionLoading(true);
+    setActionError("");
     try {
       const res = await fetch(`${apiUrl}/api/v1/incidents/${selectedId}/${action}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ actor: "sre-engineer", comment: "Status updated via OpsPilot Web UI" }),
+        body: JSON.stringify({}),
       });
       if (res.ok) {
         const updated = await res.json();
         setDetail(updated);
         await fetchIncidents();
+      } else {
+        const result = await res.json().catch(() => null);
+        setActionError(typeof result?.detail === "string" ? result.detail : "Could not update the incident.");
       }
     } catch {
-      // ignore
+      setActionError("Could not reach the workspace.");
     } finally {
       setActionLoading(false);
     }
@@ -386,6 +395,7 @@ export default function IncidentsDashboard() {
   // Trigger immediate detection run
   const handleRunEvaluation = async () => {
     setEvaluating(true);
+    setActionError("");
     try {
       const res = await fetch(`${apiUrl}/api/v1/incidents/evaluate`, {
         method: "POST",
@@ -394,9 +404,12 @@ export default function IncidentsDashboard() {
         const data = await res.json();
         setEvalResult(data);
         await fetchIncidents();
+      } else {
+        const result = await res.json().catch(() => null);
+        setActionError(typeof result?.detail === "string" ? result.detail : "Detection failed.");
       }
     } catch {
-      // ignore
+      setActionError("Could not contact the detection service.");
     } finally {
       setEvaluating(false);
     }
@@ -453,107 +466,45 @@ export default function IncidentsDashboard() {
 
   return (
     <div className="space-y-6">
-      {/* Top Stat Cards Bar */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
-          <div className="text-[11px] font-mono uppercase tracking-wider text-slate-400">
-            Active Incidents
+      <div className="incident-metrics">
+        {[
+          ["Active", stats && stats.open_incidents + stats.acknowledged_incidents + stats.investigating_incidents, "active"],
+          ["Critical", stats?.critical_incidents, "critical"],
+          ["Investigating", stats?.investigating_incidents, "investigating"],
+          ["Resolved", stats?.resolved_incidents, "resolved"],
+        ].map(([label, value, color]) => (
+          <div className="incident-metric" key={label}>
+            <span><i className={String(color)} />{label}</span>
+            <strong>{value ?? "—"}</strong>
           </div>
-          <div className="text-2xl font-bold font-mono text-white mt-1">
-            {stats ? stats.open_incidents + stats.acknowledged_incidents + stats.investigating_incidents : "-"}
-          </div>
-          <div className="text-[11px] text-slate-500 mt-1 font-mono">Requires Attention</div>
-        </div>
-
-        <div className="bg-slate-900/60 border border-rose-950/60 rounded-xl p-4">
-          <div className="text-[11px] font-mono uppercase tracking-wider text-rose-400">
-            Critical Severity
-          </div>
-          <div className="text-2xl font-bold font-mono text-rose-400 mt-1">
-            {stats ? stats.critical_incidents : "-"}
-          </div>
-          <div className="text-[11px] text-rose-500/80 mt-1 font-mono">Immediate SLA Threat</div>
-        </div>
-
-        <div className="bg-slate-900/60 border border-amber-950/60 rounded-xl p-4">
-          <div className="text-[11px] font-mono uppercase tracking-wider text-amber-400">
-            High Severity
-          </div>
-          <div className="text-2xl font-bold font-mono text-amber-400 mt-1">
-            {stats ? stats.high_incidents : "-"}
-          </div>
-          <div className="text-[11px] text-amber-500/80 mt-1 font-mono">Degraded Performance</div>
-        </div>
-
-        <div className="bg-slate-900/60 border border-indigo-950/60 rounded-xl p-4">
-          <div className="text-[11px] font-mono uppercase tracking-wider text-indigo-400">
-            Investigating
-          </div>
-          <div className="text-2xl font-bold font-mono text-indigo-400 mt-1">
-            {stats ? stats.investigating_incidents : "-"}
-          </div>
-          <div className="text-[11px] text-indigo-500/80 mt-1 font-mono">Autonomous RCA Active</div>
-        </div>
-
-        <div className="bg-slate-900/60 border border-emerald-950/60 rounded-xl p-4">
-          <div className="text-[11px] font-mono uppercase tracking-wider text-emerald-400">
-            Auto-Resolved
-          </div>
-          <div className="text-2xl font-bold font-mono text-emerald-400 mt-1">
-            {stats ? stats.resolved_incidents : "-"}
-          </div>
-          <div className="text-[11px] text-emerald-500/80 mt-1 font-mono">Verified Recoveries</div>
-        </div>
+        ))}
       </div>
-
-      {/* Action Header & Manual Evaluation Trigger */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-slate-900/40 border border-slate-800 rounded-xl p-4">
-        <div>
-          <h2 className="text-base font-bold text-white tracking-tight flex items-center gap-2">
-            <span>Deterministic Incident Detection & Autonomous RCA</span>
-            <span className="text-[10px] font-mono bg-indigo-500/10 text-indigo-400 px-2 py-0.5 rounded border border-indigo-500/30">
-              Phase 3 + Phase 4 (LangGraph)
-            </span>
-          </h2>
-          <p className="text-xs text-slate-400 font-mono mt-0.5">
-            Evaluating Prometheus golden signals every 30s. AI agents autonomously investigate root cause.
-          </p>
-        </div>
-
-        <div className="flex items-center gap-3">
-          <button
-            onClick={handleRunEvaluation}
-            disabled={evaluating}
-            className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-mono font-medium rounded-lg transition-colors flex items-center gap-2 shadow-sm"
-          >
-            {evaluating ? (
-              <>
-                <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-solid border-white border-r-transparent" />
-                <span>Evaluating Rules...</span>
-              </>
-            ) : (
-              <>
-                <span>&#x25B6;</span>
-                <span>Run Detection Now</span>
-              </>
-            )}
+      <div className="incident-list-heading">
+        <h2>Incident queue</h2>
+        {canOperate && (
+          <button className="primary-button" onClick={handleRunEvaluation} disabled={evaluating}>
+            {evaluating ? "Checking…" : "Run detection"}
           </button>
-        </div>
+        )}
       </div>
+      {!selectedId && actionError && <p className="form-error" role="alert">{actionError}</p>}
 
       {/* Detection Result Banner if Triggered */}
       {evalResult && (
         <div className="bg-slate-900 border border-slate-700/80 rounded-xl p-4 text-xs font-mono text-slate-300 flex items-center justify-between animate-in fade-in">
-          <div className="flex items-center gap-4">
-            <span className="text-emerald-400 font-bold">&#x2713; Pass Finished</span>
+          {evalResult.status === "queued" ? (
+            <span role="status">Detection queued. The incident list refreshes automatically.</span>
+          ) : <div className="flex flex-wrap items-center gap-4">
+            <span className="text-emerald-400 font-bold">Detection complete</span>
             <span>Rules: {evalResult.rules_evaluated}</span>
             <span>Breaches: {evalResult.breaches_detected}</span>
             <span className="text-rose-400 font-semibold">Created: {evalResult.incidents_created}</span>
             <span className="text-amber-400 font-semibold">Updated: {evalResult.incidents_updated}</span>
             <span className="text-emerald-400 font-semibold">Resolved: {evalResult.incidents_resolved}</span>
             <span className="text-slate-500">Duration: {evalResult.evaluation_duration_ms}ms</span>
-          </div>
+          </div>}
           <button
+            aria-label="Dismiss detection result"
             onClick={() => setEvalResult(null)}
             className="text-slate-500 hover:text-slate-300 text-sm font-bold"
           >
@@ -563,16 +514,16 @@ export default function IncidentsDashboard() {
       )}
 
       {/* Incidents Filter Controls */}
-      <div className="flex flex-wrap items-center gap-3 text-xs font-mono">
-        <span className="text-slate-400 text-[11px] uppercase tracking-wider">Filters:</span>
+      <div className="flex flex-wrap items-center gap-3 text-xs">
 
         <select
+          aria-label="Incident status"
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
           className="bg-slate-900 border border-slate-800 text-slate-200 rounded-lg px-2.5 py-1 text-xs focus:outline-none focus:border-indigo-500"
         >
-          <option value="active">Status: Active Only (Open/Ack/Investigating)</option>
-          <option value="ALL">Status: All Statuses</option>
+          <option value="active">Active incidents</option>
+          <option value="ALL">All statuses</option>
           <option value="OPEN">Status: OPEN</option>
           <option value="ACKNOWLEDGED">Status: ACKNOWLEDGED</option>
           <option value="INVESTIGATING">Status: INVESTIGATING</option>
@@ -580,11 +531,12 @@ export default function IncidentsDashboard() {
         </select>
 
         <select
+          aria-label="Severity"
           value={severityFilter}
           onChange={(e) => setSeverityFilter(e.target.value)}
           className="bg-slate-900 border border-slate-800 text-slate-200 rounded-lg px-2.5 py-1 text-xs focus:outline-none focus:border-indigo-500"
         >
-          <option value="ALL">Severity: All Severities</option>
+          <option value="ALL">All severities</option>
           <option value="CRITICAL">Severity: CRITICAL</option>
           <option value="HIGH">Severity: HIGH</option>
           <option value="MEDIUM">Severity: MEDIUM</option>
@@ -592,11 +544,12 @@ export default function IncidentsDashboard() {
         </select>
 
         <select
+          aria-label="Service"
           value={serviceFilter}
           onChange={(e) => setServiceFilter(e.target.value)}
           className="bg-slate-900 border border-slate-800 text-slate-200 rounded-lg px-2.5 py-1 text-xs focus:outline-none focus:border-indigo-500"
         >
-          <option value="ALL">Service: All Services</option>
+          <option value="ALL">All services</option>
           <option value="api-gateway">api-gateway</option>
           <option value="order-service">order-service</option>
           <option value="payment-service">payment-service</option>
@@ -610,7 +563,7 @@ export default function IncidentsDashboard() {
           }}
           className="text-slate-400 hover:text-slate-200 underline text-[11px]"
         >
-          Reset Filters
+          Reset filters
         </button>
       </div>
 
@@ -625,9 +578,9 @@ export default function IncidentsDashboard() {
         ) : incidents.length === 0 ? (
           <div className="py-16 text-center text-slate-500 font-mono space-y-2">
             <div className="text-2xl">&#x2713;</div>
-            <div className="text-slate-300 font-semibold">No Incidents Found</div>
+            <div className="text-slate-300 font-semibold">No matching incidents</div>
             <div className="text-xs text-slate-500">
-              All monitored microservices are within healthy SLA/SLO thresholds.
+              Try changing the filters to see other incidents.
             </div>
           </div>
         ) : (
@@ -665,7 +618,12 @@ export default function IncidentsDashboard() {
                       </span>
                     </td>
                     <td className="py-3.5 px-4">
-                      <div className="font-semibold text-slate-100">{inc.title}</div>
+                      <button type="button" className="incident-link" onClick={(event) => {
+                        event.stopPropagation();
+                        setSelectedId(inc.id);
+                        setDetail(null);
+                        setDetailLoading(true);
+                      }}>{inc.title}</button>
                       <div className="text-[11px] text-slate-500 font-mono">{inc.incident_type}</div>
                     </td>
                     <td className="py-3.5 px-4 whitespace-nowrap">
@@ -711,7 +669,8 @@ export default function IncidentsDashboard() {
       {/* Slide-out Incident Detail & Autonomous Investigation Drawer */}
       {selectedId && (
         <div className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="w-full max-w-2xl bg-slate-950 border-l border-slate-800 h-full overflow-y-auto p-6 space-y-6 flex flex-col shadow-2xl">
+          <div role="dialog" aria-modal="true" aria-label="Incident details" className="incident-drawer w-full max-w-2xl bg-slate-950 border-l border-slate-800 h-full overflow-y-auto p-6 space-y-6 flex flex-col shadow-2xl">
+            {actionError && <p className="form-error" role="alert">{actionError}</p>}
             {/* Drawer Header */}
             <div className="flex items-start justify-between border-b border-slate-800 pb-4">
               <div className="space-y-1">
@@ -739,7 +698,8 @@ export default function IncidentsDashboard() {
                 </h3>
               </div>
               <button
-                onClick={() => setSelectedId(null)}
+                onClick={() => { setSelectedId(null); setActionError(""); }}
+                aria-label="Close incident details"
                 className="text-slate-400 hover:text-white text-xl p-1 font-mono"
               >
                 &times;
@@ -763,6 +723,7 @@ export default function IncidentsDashboard() {
                       <>
                         <button
                           onClick={() => handleAction("acknowledge")}
+                          hidden={!canOperate}
                           disabled={actionLoading}
                           className="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white font-mono rounded-lg transition-colors"
                         >
@@ -770,6 +731,7 @@ export default function IncidentsDashboard() {
                         </button>
                         <button
                           onClick={() => handleAction("investigate")}
+                          hidden={!canOperate}
                           disabled={actionLoading}
                           className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-mono rounded-lg transition-colors"
                         >
@@ -782,6 +744,7 @@ export default function IncidentsDashboard() {
                       <>
                         <button
                           onClick={() => handleAction("investigate")}
+                          hidden={!canOperate}
                           disabled={actionLoading}
                           className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-mono rounded-lg transition-colors"
                         >
@@ -789,6 +752,7 @@ export default function IncidentsDashboard() {
                         </button>
                         <button
                           onClick={() => handleAction("resolve")}
+                          hidden={!canOperate}
                           disabled={actionLoading}
                           className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-mono rounded-lg transition-colors"
                         >
@@ -800,7 +764,8 @@ export default function IncidentsDashboard() {
                     {detail.status === "INVESTIGATING" && (
                       <button
                         onClick={() => handleAction("resolve")}
-                        disabled={actionLoading}
+                        hidden={!canOperate}
+                          disabled={actionLoading}
                         className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-mono rounded-lg transition-colors"
                       >
                         Resolve Incident
@@ -810,7 +775,7 @@ export default function IncidentsDashboard() {
                     {detail.status === "RESOLVED" && (
                       <div className="text-emerald-400 font-mono flex items-center gap-1.5">
                         <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                        Incident has been verified and resolved
+                        Incident resolved
                       </div>
                     )}
                   </div>
@@ -823,19 +788,17 @@ export default function IncidentsDashboard() {
                   <div className="flex items-center justify-between border-b border-indigo-900/40 pb-3">
                     <div className="space-y-0.5">
                       <div className="text-[11px] uppercase tracking-wider text-indigo-300 font-bold flex items-center gap-1.5">
-                        <span>&#x2728; Autonomous Investigation & RCA</span>
-                        <span className="text-[10px] bg-indigo-500/20 text-indigo-300 px-1.5 py-0.2 rounded border border-indigo-500/30">
-                          LangGraph
-                        </span>
+                        <span>Investigation</span>
                       </div>
                       <div className="text-[11px] text-slate-400">
-                        Multi-agent swarm correlates metrics, logs, traces, and past incidents.
+                        Metrics, logs, traces, and incident history.
                       </div>
                     </div>
 
                     <button
                       onClick={handleStartInvestigation}
-                      disabled={startingInvestigation || selectedInvestigation?.status === "RUNNING"}
+                      hidden={!canOperate}
+                      disabled={startingInvestigation || selectedInvestigation?.status === "RUNNING" || selectedInvestigation?.status === "PENDING"}
                       className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-mono font-medium rounded-lg transition-colors shadow-sm flex items-center gap-1.5"
                     >
                       {startingInvestigation ? (
@@ -846,7 +809,7 @@ export default function IncidentsDashboard() {
                       ) : (
                         <>
                           <span>&#x25B6;</span>
-                          <span>{selectedInvestigation ? "Re-run Investigation" : "Start Autonomous Investigation"}</span>
+                          <span>{selectedInvestigation ? "Run again" : "Start investigation"}</span>
                         </>
                       )}
                     </button>
@@ -876,7 +839,7 @@ export default function IncidentsDashboard() {
 
                   {!selectedInvestigation ? (
                     <div className="py-6 text-center text-slate-500 font-mono text-xs">
-                      No investigation has been executed for this incident yet. Click &quot;Start Autonomous Investigation&quot; to begin.
+                      No investigation has been executed for this incident yet. Click &quot;Start investigation&quot; to begin.
                     </div>
                   ) : (
                     <div className="space-y-4">
@@ -971,6 +934,7 @@ export default function IncidentsDashboard() {
                             <span>Investigation Failed</span>
                             <button
                               onClick={handleRetryInvestigation}
+                              hidden={!canOperate}
                               className="px-2 py-0.5 bg-rose-800 hover:bg-rose-700 text-white rounded text-[10px]"
                             >
                               Retry
@@ -1122,7 +1086,7 @@ export default function IncidentsDashboard() {
                                 <div className="space-y-2">
                                   {selectedInvestigation.final_report.evidence_sources.map((ev) => {
                                     const isExpanded = expandedEvidenceId === ev.evidence_id;
-                                    const deepLink = (ev.supporting_data?.deep_link as string) || "";
+                                    const deepLink = ev.supporting_data?.deep_link;
                                     return (
                                       <div
                                         key={ev.evidence_id}
@@ -1176,7 +1140,7 @@ export default function IncidentsDashboard() {
                                               </pre>
                                             </div>
 
-                                            {deepLink && (
+                                            {typeof deepLink === "string" && /^https?:\/\//.test(deepLink) && (
                                               <div className="pt-1">
                                                 <a
                                                   href={deepLink}
@@ -1280,35 +1244,7 @@ export default function IncidentsDashboard() {
                     </div>
                   )}
 
-                  {/* Telemetry Deep Links */}
-                  <div className="pt-2 border-t border-slate-800/80 flex items-center gap-3 text-[11px]">
-                    <a
-                      href="http://localhost:3001"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-indigo-400 hover:text-indigo-300 underline"
-                    >
-                      Grafana Dashboard &rarr;
-                    </a>
-                    <span className="text-slate-700">|</span>
-                    <a
-                      href="http://localhost:9090"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-amber-400 hover:text-amber-300 underline"
-                    >
-                      Prometheus &rarr;
-                    </a>
-                    <span className="text-slate-700">|</span>
-                    <a
-                      href="http://localhost:3200"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-emerald-400 hover:text-emerald-300 underline"
-                    >
-                      Tempo Traces &rarr;
-                    </a>
-                  </div>
+
                 </div>
 
                 {/* Audit Trail Timeline */}

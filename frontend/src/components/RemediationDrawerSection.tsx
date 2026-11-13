@@ -1,5 +1,6 @@
 "use client";
 
+import { useIdentity } from "./Workspace";
 import { useEffect, useState, useCallback } from "react";
 
 export interface RemediationAction {
@@ -30,19 +31,18 @@ export interface RemediationAction {
 }
 
 export interface VerificationObservation {
-  cycle: number;
   timestamp: string;
+  telemetry_available: boolean;
   healthy: boolean;
-  metric_name: string;
-  value: number | null;
-  threshold?: number | null;
-  failure_reason?: string | null;
+  observed_value: number | null;
+  threshold: number | null;
+  details: { metric?: string };
 }
 
 export interface RemediationVerificationRun {
   id: string;
   execution_id: string;
-  status: "VERIFYING" | "RECOVERED" | "STILL_DEGRADED" | "REGRESSION_DETECTED" | "TELEMETRY_UNAVAILABLE";
+  status: "VERIFYING" | "RECOVERED" | "STILL_DEGRADED" | "REGRESSION_DETECTED" | "TELEMETRY_UNAVAILABLE" | "VERIFICATION_FAILED";
   started_at: string;
   completed_at: string | null;
   consecutive_healthy_count: number;
@@ -137,6 +137,8 @@ export function RemediationDrawerSection({
   apiUrl,
   onIncidentResolved,
 }: RemediationDrawerSectionProps) {
+  const identity = useIdentity();
+  const requiresToken = !identity.authenticated;
   const [plans, setPlans] = useState<RemediationPlan[]>([]);
   const [selectedPlan, setSelectedPlan] = useState<RemediationPlan | null>(null);
   const [auditEvents, setAuditEvents] = useState<RemediationAuditEvent[]>([]);
@@ -146,7 +148,7 @@ export function RemediationDrawerSection({
 
   // Approval modal state
   const [approvingAction, setApprovingAction] = useState<RemediationAction | null>(null);
-  const [approverId, setApproverId] = useState<string>("operator-sre");
+  const [operatorToken, setOperatorToken] = useState("");
   const [approvalComment, setApprovalComment] = useState<string>("");
   const [confirmCheckbox, setConfirmCheckbox] = useState<boolean>(false);
   const [submittingApproval, setSubmittingApproval] = useState<boolean>(false);
@@ -312,7 +314,7 @@ export function RemediationDrawerSection({
 
   // Handle Approve Action
   const handleConfirmApproval = async () => {
-    if (!selectedPlan || !approvingAction || !confirmCheckbox) return;
+    if (!selectedPlan || !approvingAction || !confirmCheckbox || (requiresToken && !operatorToken.trim())) return;
     try {
       setSubmittingApproval(true);
       setErrorMessage(null);
@@ -320,9 +322,11 @@ export function RemediationDrawerSection({
         `${apiUrl}/api/v1/remediation-plans/${selectedPlan.id}/actions/${approvingAction.id}/approve`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...(requiresToken ? { Authorization: `Bearer ${operatorToken.trim()}` } : {}),
+          },
           body: JSON.stringify({
-            approver_id: approverId.trim() || "operator-sre",
             comment: approvalComment.trim() || "Operator approved remediation action execution",
             plan_version: selectedPlan.version,
           }),
@@ -336,6 +340,7 @@ export function RemediationDrawerSection({
 
       setApprovingAction(null);
       setApprovalComment("");
+      setOperatorToken("");
       setConfirmCheckbox(false);
       // Refresh plan immediately
       void refreshPlans();
@@ -348,7 +353,7 @@ export function RemediationDrawerSection({
 
   // Handle Reject Action
   const handleConfirmRejection = async () => {
-    if (!selectedPlan || !rejectingAction || !rejectionComment.trim()) return;
+    if (!selectedPlan || !rejectingAction || !rejectionComment.trim() || (requiresToken && !operatorToken.trim())) return;
     try {
       setSubmittingRejection(true);
       setErrorMessage(null);
@@ -356,9 +361,11 @@ export function RemediationDrawerSection({
         `${apiUrl}/api/v1/remediation-plans/${selectedPlan.id}/actions/${rejectingAction.id}/reject`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...(requiresToken ? { Authorization: `Bearer ${operatorToken.trim()}` } : {}),
+          },
           body: JSON.stringify({
-            approver_id: approverId.trim() || "operator-sre",
             comment: rejectionComment.trim(),
           }),
         }
@@ -371,6 +378,7 @@ export function RemediationDrawerSection({
 
       setRejectingAction(null);
       setRejectionComment("");
+      setOperatorToken("");
       void refreshPlans();
     } catch (err) {
       setErrorMessage((err as Error).message);
@@ -430,18 +438,16 @@ export function RemediationDrawerSection({
       <div className="flex items-center justify-between border-b border-emerald-900/30 pb-3">
         <div className="space-y-0.5">
           <div className="text-[11px] uppercase tracking-wider text-emerald-300 font-bold flex items-center gap-1.5">
-            <span>&#x2699; Human-Approved Remediation & Recovery</span>
-            <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.2 rounded border border-emerald-500/30">
-              Phase 5
-            </span>
+            <span>Remediation</span>
           </div>
           <div className="text-[11px] text-slate-400 font-sans">
-            Propose allowlisted operational fixes, enforce mandatory human approval, and verify telemetry recovery.
+            Review proposed actions and track recovery.
           </div>
         </div>
 
         <button
           onClick={handleProposePlan}
+          hidden={identity.role !== "operator" || !identity.remediation_enabled}
           disabled={proposing || selectedPlan?.status === "EXECUTING" || selectedPlan?.status === "VERIFYING"}
           className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-mono font-medium rounded-lg transition-colors shadow-sm flex items-center gap-1.5"
         >
@@ -714,10 +720,6 @@ export function RemediationDrawerSection({
                 <div className="flex flex-wrap items-center gap-3 text-[10px] text-slate-400 pt-1 border-t border-slate-800/60">
                   <div className="flex items-center gap-1 text-emerald-400">
                     <span>&#x2713;</span>
-                    <span>Allowlist Verified</span>
-                  </div>
-                  <div className="flex items-center gap-1 text-emerald-400">
-                    <span>&#x2713;</span>
                     <span>Reversible: {act.reversible ? "Yes" : "No"}</span>
                   </div>
                   <div className="flex items-center gap-1 text-slate-400">
@@ -727,7 +729,7 @@ export function RemediationDrawerSection({
                 </div>
 
                 {/* Human Approval Action Buttons */}
-                {(act.status === "PROPOSED" || act.status === "PENDING_APPROVAL") &&
+                {identity.role === "operator" && identity.remediation_enabled && act.status === "PENDING_APPROVAL" &&
                   selectedPlan.status === "PENDING_APPROVAL" && (
                     <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
                       <button
@@ -812,20 +814,18 @@ export function RemediationDrawerSection({
                       <tbody className="divide-y divide-slate-800/60 font-mono text-[11px]">
                         {activeVerification.observations.map((obs, idx) => (
                           <tr key={idx} className="hover:bg-slate-900/40">
-                            <td className="p-2 text-slate-400">#{obs.cycle}</td>
+                            <td className="p-2 text-slate-400">#{idx + 1}</td>
                             <td className="p-2 text-slate-400">
                               {new Date(obs.timestamp).toLocaleTimeString()}
                             </td>
-                            <td className="p-2 text-slate-300">{obs.metric_name}</td>
+                            <td className="p-2 text-slate-300">{obs.details?.metric ?? "—"}</td>
                             <td className="p-2 font-bold text-white">
-                              {obs.value !== null && obs.value !== undefined
-                                ? typeof obs.value === "number"
-                                  ? obs.value.toFixed(4)
-                                  : obs.value
-                                : "N/A"}
+                              {obs.observed_value?.toFixed(4) ?? "N/A"}
                             </td>
                             <td className="p-2">
-                              {obs.healthy ? (
+                              {!obs.telemetry_available ? (
+                                <span className="text-amber-300">Unavailable</span>
+                              ) : obs.healthy ? (
                                 <span className="px-1.5 py-0.2 bg-emerald-950 text-emerald-400 border border-emerald-800 rounded text-[10px] font-bold">
                                   PASS
                                 </span>
@@ -886,7 +886,7 @@ export function RemediationDrawerSection({
                 <span>Mandatory Human Approval Authorization</span>
               </div>
               <button
-                onClick={() => setApprovingAction(null)}
+                onClick={() => { setApprovingAction(null); setOperatorToken(""); }}
                 className="text-slate-400 hover:text-white text-lg font-bold"
               >
                 &times;
@@ -913,20 +913,30 @@ export function RemediationDrawerSection({
                     {approvingAction.risk_level}
                   </span>
                 </div>
+                {Object.keys(approvingAction.parameters).length > 0 && (
+                  <div className="break-words text-[11px] text-slate-300">
+                    <span className="text-slate-500">Parameters </span>
+                    {JSON.stringify(approvingAction.parameters)}
+                  </div>
+                )}
+                {Object.keys(approvingAction.verification_conditions).length > 0 && (
+                  <div className="break-words text-[11px] text-slate-300">
+                    <span className="text-slate-500">Recovery criteria </span>
+                    {JSON.stringify(approvingAction.verification_conditions)}
+                  </div>
+                )}
               </div>
 
-              <div className="space-y-1">
-                <label className="text-[11px] font-mono text-slate-300 font-bold">
-                  Operator Identity:
-                </label>
+              {requiresToken && <label className="block space-y-1 text-[11px] font-mono text-slate-300 font-bold">
+                <span>Operator token</span>
                 <input
-                  type="text"
-                  value={approverId}
-                  onChange={(e) => setApproverId(e.target.value)}
+                  type="password"
+                  autoComplete="off"
+                  value={operatorToken}
+                  onChange={(e) => setOperatorToken(e.target.value)}
                   className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-white focus:outline-none focus:border-emerald-500 font-mono"
-                  placeholder="e.g. alice@sre-team"
                 />
-              </div>
+              </label>}
 
               <div className="space-y-1">
                 <label className="text-[11px] font-mono text-slate-300 font-bold">
@@ -950,21 +960,23 @@ export function RemediationDrawerSection({
                 />
                 <span className="text-[11px] text-slate-300">
                   I explicitly authorize OpsPilot to execute this allowlisted action on{" "}
-                  <strong className="text-white">{approvingAction.target_service}</strong>. I acknowledge this execution will be logged to the immutable audit trail.
+                  <strong className="text-white">{approvingAction.target_service}</strong>. I acknowledge this execution will be logged to the remediation audit log.
                 </span>
               </label>
             </div>
 
+            {errorMessage && <p role="alert" className="text-xs text-rose-300">{errorMessage}</p>}
+
             <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
               <button
-                onClick={() => setApprovingAction(null)}
+                onClick={() => { setApprovingAction(null); setOperatorToken(""); }}
                 className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs rounded transition-colors"
               >
                 Cancel
               </button>
               <button
                 onClick={handleConfirmApproval}
-                disabled={!confirmCheckbox || submittingApproval}
+                disabled={!confirmCheckbox || (requiresToken && !operatorToken.trim()) || submittingApproval}
                 className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold rounded transition-colors flex items-center gap-1.5"
               >
                 {submittingApproval ? (
@@ -991,7 +1003,7 @@ export function RemediationDrawerSection({
                 <span>Reject Remediation Action</span>
               </div>
               <button
-                onClick={() => setRejectingAction(null)}
+                onClick={() => { setRejectingAction(null); setOperatorToken(""); }}
                 className="text-slate-400 hover:text-white text-lg font-bold"
               >
                 &times;
@@ -1003,6 +1015,17 @@ export function RemediationDrawerSection({
                 You are rejecting action <strong className="text-white font-mono">{rejectingAction.action_type}</strong> for{" "}
                 <strong className="text-white font-mono">{rejectingAction.target_service}</strong>.
               </p>
+
+              {requiresToken && <label className="block space-y-1 text-[11px] font-mono text-slate-300 font-bold">
+                <span>Operator token</span>
+                <input
+                  type="password"
+                  autoComplete="off"
+                  value={operatorToken}
+                  onChange={(e) => setOperatorToken(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-white focus:outline-none focus:border-emerald-500 font-mono"
+                />
+              </label>}
 
               <div className="space-y-1">
                 <label className="text-[11px] font-mono text-slate-300 font-bold">
@@ -1018,16 +1041,18 @@ export function RemediationDrawerSection({
               </div>
             </div>
 
+            {errorMessage && <p role="alert" className="text-xs text-rose-300">{errorMessage}</p>}
+
             <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
               <button
-                onClick={() => setRejectingAction(null)}
+                onClick={() => { setRejectingAction(null); setOperatorToken(""); }}
                 className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs rounded transition-colors"
               >
                 Cancel
               </button>
               <button
                 onClick={handleConfirmRejection}
-                disabled={!rejectionComment.trim() || submittingRejection}
+                disabled={!rejectionComment.trim() || (requiresToken && !operatorToken.trim()) || submittingRejection}
                 className="px-4 py-1.5 bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white text-xs font-bold rounded transition-colors flex items-center gap-1.5"
               >
                 {submittingRejection ? (
