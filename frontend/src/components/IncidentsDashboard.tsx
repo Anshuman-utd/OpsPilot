@@ -108,6 +108,7 @@ export interface EvidenceReference {
 }
 
 export interface FinalRCAReport {
+  synthesis_mode?: "llm" | "deterministic";
   executive_summary: string;
   incident_description: string;
   timeline?: Array<{ time: string; event: string }>;
@@ -151,7 +152,7 @@ const AGENT_DISPLAY_NAMES: Record<string, string> = {
   validator_agent: "Evidence Validator",
 };
 
-export default function IncidentsDashboard() {
+export default function IncidentsDashboard({ initialIncidentId }: { initialIncidentId?: string }) {
   const canOperate = useIdentity().role === "operator";
   const [actionError, setActionError] = useState("");
   const [incidents, setIncidents] = useState<Incident[]>([]);
@@ -162,12 +163,16 @@ export default function IncidentsDashboard() {
   // Filters
   const [statusFilter, setStatusFilter] = useState<string>("active");
   const [severityFilter, setSeverityFilter] = useState<string>("ALL");
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(0);
+  const [more, setMore] = useState(false);
+  const pageSize = 25;
   const [serviceFilter, setServiceFilter] = useState<string>("ALL");
 
   // Selected Incident Drawer
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(initialIncidentId ?? null);
   const [detail, setDetail] = useState<IncidentDetail | null>(null);
-  const [detailLoading, setDetailLoading] = useState<boolean>(false);
+  const [detailLoading, setDetailLoading] = useState(Boolean(initialIncidentId));
   const [actionLoading, setActionLoading] = useState<boolean>(false);
 
   // Autonomous Investigation States
@@ -183,46 +188,43 @@ export default function IncidentsDashboard() {
   const apiUrl = "";
 
   // Fetch stats and incident list
-  const fetchIncidents = useCallback(async () => {
+  const fetchIncidents = useCallback(async (signal?: AbortSignal) => {
     try {
-      const params = new URLSearchParams();
+      const params = new URLSearchParams({ limit: String(pageSize + 1), offset: String(page * pageSize) });
+      if (search.trim()) params.set("search", search.trim());
       if (statusFilter !== "ALL") params.append("status", statusFilter);
       if (severityFilter !== "ALL") params.append("severity", severityFilter);
       if (serviceFilter !== "ALL") params.append("service", serviceFilter);
 
       const [incRes, statsRes] = await Promise.all([
-        fetch(`${apiUrl}/api/v1/incidents?${params.toString()}`, { cache: "no-store" }),
-        fetch(`${apiUrl}/api/v1/incidents/stats`, { cache: "no-store" }),
+        fetch(`${apiUrl}/api/v1/incidents?${params.toString()}`, { cache: "no-store", signal }),
+        fetch(`${apiUrl}/api/v1/incidents/stats`, { cache: "no-store", signal }),
       ]);
 
       if (incRes.ok && statsRes.ok) {
         const incData = await incRes.json();
         const statsData = await statsRes.json();
-        setIncidents(incData);
+        if (signal?.aborted) return;
+        setIncidents(incData.slice(0, pageSize));
+        setMore(incData.length > pageSize);
         setStats(statsData);
         setError(null);
       } else {
         setError(`Failed to fetch incidents (HTTP ${incRes.status})`);
       }
     } catch (err) {
-      setError(`Backend connection error: ${String(err)}`);
+      if (!signal?.aborted) setError(`Could not load incidents: ${String(err)}`);
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
-  }, [apiUrl, statusFilter, severityFilter, serviceFilter]);
+  }, [apiUrl, statusFilter, severityFilter, serviceFilter, search, page]);
 
   useEffect(() => {
-    let isMounted = true;
-    const run = async () => {
-      if (isMounted) await fetchIncidents();
-    };
-    void run();
-
-    const interval = setInterval(run, 8000);
-    return () => {
-      isMounted = false;
-      clearInterval(interval);
-    };
+    const controller = new AbortController();
+    const refresh = () => { if (!document.hidden) void fetchIncidents(controller.signal); };
+    const first = setTimeout(refresh, 250);
+    const timer = setInterval(refresh, 8000);
+    return () => { controller.abort(); clearTimeout(first); clearInterval(timer); };
   }, [fetchIncidents]);
 
   const fetchInvestigationDetail = useCallback(async (invId: string) => {
@@ -515,11 +517,12 @@ export default function IncidentsDashboard() {
 
       {/* Incidents Filter Controls */}
       <div className="flex flex-wrap items-center gap-3 text-xs">
-
+        <input type="search" className="incident-search" aria-label="Search incidents" placeholder="Search incidents"
+          value={search} maxLength={100} onChange={(event) => { setSearch(event.target.value); setPage(0); }} />
         <select
           aria-label="Incident status"
           value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
+          onChange={(e) => { setStatusFilter(e.target.value); setPage(0); }}
           className="bg-slate-900 border border-slate-800 text-slate-200 rounded-lg px-2.5 py-1 text-xs focus:outline-none focus:border-indigo-500"
         >
           <option value="active">Active incidents</option>
@@ -533,7 +536,7 @@ export default function IncidentsDashboard() {
         <select
           aria-label="Severity"
           value={severityFilter}
-          onChange={(e) => setSeverityFilter(e.target.value)}
+          onChange={(e) => { setSeverityFilter(e.target.value); setPage(0); }}
           className="bg-slate-900 border border-slate-800 text-slate-200 rounded-lg px-2.5 py-1 text-xs focus:outline-none focus:border-indigo-500"
         >
           <option value="ALL">All severities</option>
@@ -546,7 +549,7 @@ export default function IncidentsDashboard() {
         <select
           aria-label="Service"
           value={serviceFilter}
-          onChange={(e) => setServiceFilter(e.target.value)}
+          onChange={(e) => { setServiceFilter(e.target.value); setPage(0); }}
           className="bg-slate-900 border border-slate-800 text-slate-200 rounded-lg px-2.5 py-1 text-xs focus:outline-none focus:border-indigo-500"
         >
           <option value="ALL">All services</option>
@@ -557,6 +560,8 @@ export default function IncidentsDashboard() {
 
         <button
           onClick={() => {
+            setSearch("");
+            setPage(0);
             setStatusFilter("active");
             setSeverityFilter("ALL");
             setServiceFilter("ALL");
@@ -666,6 +671,14 @@ export default function IncidentsDashboard() {
         )}
       </div>
 
+      {(page > 0 || more) && (
+        <div className="flex items-center justify-end gap-4 text-sm" aria-label="Incident pages">
+          <button className="secondary-button" disabled={page === 0} onClick={() => setPage(page - 1)}>Previous</button>
+          <span>Page {page + 1}</span>
+          <button className="secondary-button" disabled={!more} onClick={() => setPage(page + 1)}>Next</button>
+        </div>
+      )}
+
       {/* Slide-out Incident Detail & Autonomous Investigation Drawer */}
       {selectedId && (
         <div className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
@@ -693,9 +706,8 @@ export default function IncidentsDashboard() {
                     {detail?.service_name}
                   </span>
                 </div>
-                <h3 className="text-lg font-bold text-white tracking-tight mt-1">
-                  {detail?.title}
-                </h3>
+                <h3 className="text-lg font-bold text-white tracking-tight mt-1">{detail?.title}</h3>
+                {detail && <a className="text-xs text-indigo-300 underline" href={`/api/v1/incidents/${detail.id}/report`}>Download incident report</a>}
               </div>
               <button
                 onClick={() => { setSelectedId(null); setActionError(""); }}
@@ -708,7 +720,7 @@ export default function IncidentsDashboard() {
 
             {detailLoading || !detail ? (
               <div className="py-20 text-center text-slate-500 font-mono text-xs">
-                Loading incident details...
+                {detailLoading ? "Loading incident details…" : "Incident details are unavailable."}
               </div>
             ) : (
               <div className="space-y-6 flex-1 text-xs font-mono">
@@ -860,7 +872,9 @@ export default function IncidentsDashboard() {
                           >
                             {selectedInvestigation.status}
                           </span>
-                          {selectedInvestigation.model_name && (
+                          {selectedInvestigation.final_report?.synthesis_mode === "deterministic" ? (
+                            <span>Deterministic synthesis</span>
+                          ) : selectedInvestigation.model_name && (
                             <span className="text-slate-500 text-[11px]">
                               Model: <span className="text-slate-300">{selectedInvestigation.model_name}</span>
                             </span>
@@ -1194,6 +1208,7 @@ export default function IncidentsDashboard() {
                 {/* ========================================================================= */}
                 <RemediationDrawerSection
                   incidentId={detail.id}
+                  incidentResolved={detail.status === "RESOLVED"}
                   investigationId={selectedInvestigation?.id}
                   apiUrl={apiUrl}
                   onIncidentResolved={async () => {

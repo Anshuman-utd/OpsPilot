@@ -151,3 +151,31 @@ button[hidden] { display: none; }
   .sign-in-foot { display: none; }
   .sign-in-body { place-items: start center; padding-top: 42px; }
 }
+
+.auth-switch { margin-top: 17px; color: var(--accent); font-size: 13px; }
+.auth-switch:hover { text-decoration: underline; }
+.workspace-panel { padding: 20px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.workspace-panel h2 { font-size: 18px; font-weight: 650; letter-spacing: -.02em; }
+.workspace-panel p, .workflow-list { color: var(--muted); font-size: 13px; margin: 8px 0 15px; line-height: 1.65; }
+.workspace-panel p strong { color: var(--foreground); }
+.workflow-list { list-style: decimal; padding-left: 20px; }
+.workflow-list li + li { margin-top: 7px; }
+.invite-result { margin-top: 16px; }
+.invite-result label, .lab-controls label { display: block; margin-bottom: 7px; font-size: 13px; }
+.invite-result input, .lab-controls select, .incident-search { padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--background); color: var(--foreground); }
+.invite-result input { width: min(100%, 400px); font-family: monospace; font-size: 13px; }
+@media (max-width: 760px) {
+  .sidebar nav { display: flex; overflow-x: auto; }
+  .sidebar nav button { flex: 0 0 auto; padding-inline: 10px; }
+}
+.secondary-button { padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+.secondary-button:disabled { opacity: .45; }
+.service-path { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; margin-top: 15px; }
+.service-path li { position: relative; padding: 10px; border: 1px solid var(--line); border-radius: 7px; }
+.service-path li:not(:last-child)::after { content: "→"; position: absolute; right: -20px; top: 15px; color: var(--muted); }
+.service-path strong, .service-path span { display: block; font-size: 12px; }
+.service-path span { color: var(--muted); text-transform: capitalize; margin-top: 4px; }
+@media (max-width: 480px) {
+  .service-path { grid-template-columns: minmax(0, 1fr); gap: 19px; }
+  .service-path li:not(:last-child)::after { content: "↓"; top: auto; bottom: -19px; left: 12px; }
+}
