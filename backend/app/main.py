@@ -2,11 +2,14 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.auth import router as auth_router
 from app.api.health import router as health_router
 from app.api.incidents import router as incidents_router
+from app.api.services import router as services_router
+from app.core.auth import authorize_workspace
 from app.core.config import get_settings
 from app.investigation.router import router as investigations_router
 from app.remediation.router import router as remediation_router
@@ -45,16 +48,16 @@ def create_application() -> FastAPI:
             "recommends remediation, and verifies service recovery."
         ),
         version=settings.APP_VERSION,
-        docs_url="/docs",
-        redoc_url="/redoc",
-        openapi_url="/openapi.json",
+        docs_url=None if settings.auth_required else "/docs",
+        redoc_url=None if settings.auth_required else "/redoc",
+        openapi_url=None if settings.auth_required else "/openapi.json",
         lifespan=lifespan,
     )
 
     # Allow cross-origin requests from frontend development server
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=[
+        allow_origins=[settings.PUBLIC_ORIGIN.rstrip("/")] if settings.auth_required else [
             "http://localhost:3000",
             "http://127.0.0.1:3000",
         ],
@@ -63,11 +66,21 @@ def create_application() -> FastAPI:
         allow_headers=["*"],
     )
 
+    @application.middleware("http")
+    async def prevent_workspace_caching(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
     # Register API routers
     application.include_router(health_router)
-    application.include_router(incidents_router)
-    application.include_router(investigations_router)
-    application.include_router(remediation_router)
+    application.include_router(auth_router)
+    protected = [Depends(authorize_workspace)] if settings.auth_required else []
+    application.include_router(incidents_router, dependencies=protected)
+    application.include_router(investigations_router, dependencies=protected)
+    application.include_router(remediation_router, dependencies=protected)
+    application.include_router(services_router, dependencies=protected)
 
     @application.get(
         "/",

@@ -1,12 +1,16 @@
 """FastAPI Router for Phase 5 Remediation & Approval APIs."""
 
-import logging
+from secrets import compare_digest
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import authorize_workspace
+from app.core.config import get_settings
 from app.core.database import get_db_session
+from app.models.account import Account
 from app.remediation.schemas import (
     RemediationApprovalRequest,
     RemediationApprovalResponse,
@@ -18,10 +22,32 @@ from app.remediation.schemas import (
 )
 from app.remediation.service import RemediationService
 
-logger = logging.getLogger("opspilot.api.remediation")
-
 router = APIRouter(tags=["Remediation & Recovery"])
 service = RemediationService()
+operator_bearer = HTTPBearer(auto_error=False)
+
+
+async def require_remediation_operator(
+    account: Annotated[Account, Depends(authorize_workspace)],
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(operator_bearer)],
+) -> str:
+    settings = get_settings()
+    if settings.auth_required:
+        if not settings.REMEDIATION_ENABLED:
+            raise HTTPException(status_code=503, detail="Remediation is disabled.")
+        return account.username
+    token = settings.REMEDIATION_OPERATOR_TOKEN
+    if not settings.REMEDIATION_ENABLED or token is None or not token.get_secret_value():
+        raise HTTPException(status_code=503, detail="Remediation operator access is disabled or unconfigured.")
+    if credentials is None or not compare_digest(
+        credentials.credentials.encode(), token.get_secret_value().encode()
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="A valid remediation operator token is required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return settings.REMEDIATION_OPERATOR_ID
 
 
 @router.post(
@@ -74,10 +100,13 @@ async def approve_remediation_action(
     plan_id: str,
     action_id: str,
     request: RemediationApprovalRequest,
+    operator: Annotated[str, Depends(require_remediation_operator)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> RemediationApprovalResponse:
     """Explicitly approve an allowlisted action, scheduling its asynchronous controlled execution."""
-    approval, _execution = await service.approve_action(plan_id, action_id, request, db)
+    approval, _execution = await service.approve_action(
+        plan_id, action_id, request.model_copy(update={"approver_id": operator}), db
+    )
     return RemediationApprovalResponse.model_validate(approval)
 
 
@@ -90,10 +119,13 @@ async def reject_remediation_action(
     plan_id: str,
     action_id: str,
     request: RemediationRejectionRequest,
+    operator: Annotated[str, Depends(require_remediation_operator)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> RemediationApprovalResponse:
     """Reject a proposed action with an auditable operator rationale."""
-    approval = await service.reject_action(plan_id, action_id, request, db)
+    approval = await service.reject_action(
+        plan_id, action_id, request.model_copy(update={"approver_id": operator}), db
+    )
     return RemediationApprovalResponse.model_validate(approval)
 
 
@@ -103,11 +135,12 @@ async def reject_remediation_action(
 )
 async def cancel_remediation_plan(
     plan_id: str,
+    operator: Annotated[str, Depends(require_remediation_operator)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
     reason: str = "Operator cancelled plan",
 ) -> RemediationPlanResponse:
     """Cancel a pending remediation plan."""
-    plan = await service.cancel_plan(plan_id, reason, "operator", db)
+    plan = await service.cancel_plan(plan_id, reason, operator, db)
     return RemediationPlanResponse.model_validate(plan)
 
 

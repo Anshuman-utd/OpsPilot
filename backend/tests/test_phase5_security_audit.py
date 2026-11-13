@@ -1,24 +1,15 @@
-"""Targeted Empirical Verification Tests for Phase 5 Independent Security & Execution Integrity Audit.
+"""Regression tests for remediation approval, execution boundaries, and recovery."""
 
-Validates:
-1. Approver identity unauthenticated input and lack of cryptographic signatures.
-2. Lack of action content hashing allowing parameter mutation post-approval.
-3. Service base URL configuration accepting arbitrary hosts/metadata IPs (SSRF susceptibility).
-4. Fault type path traversal rejection by allowlist validator.
-5. Distributed locking release bug: lock deletion without ownership token deletes other workers' locks.
-6. Celery task failure state when worker crashes mid-execution.
-7. Pseudo-actions inspecting actual endpoint dispatch.
-8. Recovery verification polling window and metric scale consistency.
-"""
-
-import asyncio
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
+from app.core.database import get_db_session
+from app.main import app
 from app.models.incident import IncidentModel, IncidentSeverity, IncidentStatus
 from app.remediation.executor import RemediationExecutor
 from app.remediation.registry import (
@@ -32,11 +23,8 @@ from app.remediation.verifier import RecoveryVerificationEngine
 
 
 @pytest.mark.asyncio
-async def test_audit_1_arbitrary_unauthenticated_approver_identity(sqlite_session: AsyncSession):
-    """Verify that an arbitrary spoofed approver_id can be submitted without authentication or signatures."""
-    incident_id = f"inc-{uuid.uuid4()}"
+async def test_operator_token_required_and_body_identity_ignored(async_client, sqlite_session: AsyncSession):
     incident = IncidentModel(
-        id=incident_id,
         title="Payment Service Degradation",
         service_name="payment-service",
         severity=IncidentSeverity.HIGH.value,
@@ -47,35 +35,38 @@ async def test_audit_1_arbitrary_unauthenticated_approver_identity(sqlite_sessio
     )
     sqlite_session.add(incident)
     await sqlite_session.commit()
+    plan = await RemediationService().create_plan(incident_id=incident.id, db=sqlite_session)
 
-    service = RemediationService()
-    plan = await service.create_plan(incident_id=incident_id, db=sqlite_session)
-    action = plan.actions[0]
+    async def override_session():
+        yield sqlite_session
 
-    # Client submits arbitrary spoofed approver identity with NO credentials or signature
-    spoofed_identity = "chief_executive_officer@external-attacker.com"
-    with patch("app.workers.remediation_tasks.run_remediation_execution_task.delay"):
-        approval, execution = await service.approve_action(
-            plan_id=plan.id,
-            action_id=action.id,
-            approval_req=RemediationApprovalRequest(
-                approver_id=spoofed_identity,
-                comment="Spoofed approval comment without cryptographic signature",
-                plan_version=plan.version,
-            ),
-            db=sqlite_session,
-        )
-
-    # Verified: approver_id is persisted exactly as submitted; no signature exists
-    assert approval.approver_id == spoofed_identity
-    assert not hasattr(approval, "signature")
-    assert not hasattr(approval, "public_key")
-    assert not hasattr(approval, "digest")
+    endpoint = f"/api/v1/remediation-plans/{plan.id}/actions/{plan.actions[0].id}/approve"
+    request = {"approver_id": "spoofed-operator", "plan_version": plan.version}
+    app.dependency_overrides[get_db_session] = override_session
+    try:
+        with (
+            patch("app.remediation.router.get_settings", return_value=Settings(
+                REMEDIATION_OPERATOR_ID="configured-operator",
+                REMEDIATION_OPERATOR_TOKEN="test-token",
+            )),
+            patch("app.workers.remediation_tasks.run_remediation_execution_task.delay") as enqueue,
+        ):
+            response = await async_client.post(endpoint, json=request)
+            assert response.status_code == 401
+            enqueue.assert_not_called()
+            response = await async_client.post(
+                endpoint, json=request, headers={"Authorization": "Bearer test-token"}
+            )
+            assert response.status_code == 202
+            assert response.json()["approver_id"] == "configured-operator"
+            enqueue.assert_called_once()
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
 
 
 @pytest.mark.asyncio
-async def test_audit_2_action_tampering_post_approval_executes_unreviewed_parameters(sqlite_session: AsyncSession):
-    """Verify that action parameters modified after approval are executed because approval lacks a content hash."""
+async def test_action_tampering_post_approval_is_rejected(sqlite_session: AsyncSession):
+    """Reject modified action parameters before dispatch."""
     incident_id = f"inc-{uuid.uuid4()}"
     incident = IncidentModel(
         id=incident_id,
@@ -93,7 +84,6 @@ async def test_audit_2_action_tampering_post_approval_executes_unreviewed_parame
     service = RemediationService()
     plan = await service.create_plan(incident_id=incident_id, db=sqlite_session)
     action = plan.actions[0]
-    initial_params = dict(action.parameters)
 
     with patch("app.workers.remediation_tasks.run_remediation_execution_task.delay"):
         approval, execution = await service.approve_action(
@@ -128,14 +118,12 @@ async def test_audit_2_action_tampering_post_approval_executes_unreviewed_parame
     ):
         res = await executor.execute_action(execution.id, session_factory=session_factory)
 
-    assert res["status"] == "success"
-    # The handler executed the TAMPERED parameters, not the parameters reviewed by the operator!
-    assert captured_params != initial_params
-    assert captured_params == {"fault_type": "downstream_latency_spike"}
+    assert res["status"] == "policy_rejected"
+    assert captured_params == {}
 
 
-def test_audit_3_unvalidated_service_urls_permit_ssrf_configuration():
-    """Verify that Settings accepts arbitrary external and metadata URLs without validation."""
+def test_service_urls_reject_non_demo_origins():
+    """Reject arbitrary external origins and non-HTTP protocols."""
     malicious_urls = [
         "http://169.254.169.254/latest/meta-data/",
         "http://attacker-controlled.internal:8002",
@@ -143,9 +131,8 @@ def test_audit_3_unvalidated_service_urls_permit_ssrf_configuration():
         "ftp://malicious.host:21",
     ]
     for url in malicious_urls:
-        cfg = Settings(ORDER_SERVICE_URL=url)
-        # Settings does not validate scheme, host, or private IP addresses
-        assert url == cfg.ORDER_SERVICE_URL
+        with pytest.raises(ValidationError, match="demo-service HTTP origin"):
+            Settings(ORDER_SERVICE_URL=url)
 
 
 def test_audit_4_fault_type_path_traversal_blocked_by_allowlist():
@@ -271,30 +258,14 @@ async def test_audit_6_pseudo_actions_target_fault_endpoints_not_real_subsystems
 
 
 @pytest.mark.asyncio
-async def test_audit_7_stale_sampling_interval_in_rapid_polling():
-    """Verify that 3 observations at 2-second polling query virtually the same 2-minute rolling rate window."""
-    timestamps = []
-
-    async def mock_query(*args, **kwargs):
-        timestamps.append((kwargs.get("start"), kwargs.get("end")))
-        mock_res = MagicMock()
-        mock_res.success = True
-        mock_res.series = [MagicMock(latest_value=0.01)]
-        return mock_res
-
+async def test_verifier_queries_a_current_point_instead_of_reusing_history():
     mock_prom = AsyncMock()
-    mock_prom.get_service_error_rate = mock_query
-
+    mock_prom.get_service_error_rate.return_value = MagicMock(success=True, series=[])
     verifier = RecoveryVerificationEngine(prometheus_tool=mock_prom)
 
-    # Run 3 consecutive observations separated by 0.05s
-    for _ in range(3):
-        await verifier.evaluate_observation("order-service", {"metric": "http_error_rate", "threshold": 0.05}, window_seconds=120.0)
-        await asyncio.sleep(0.05)
+    with patch("app.remediation.verifier.time.time", return_value=120.0):
+        observation = await verifier.evaluate_observation("order-service", {"metric": "http_error_rate"})
 
-    assert len(timestamps) == 3
-    # The time windows overlap by more than 99%
-    w1_start, w1_end = timestamps[0]
-    w3_start, w3_end = timestamps[2]
-    overlap = (w1_end - w3_start) / 120.0
-    assert overlap > 0.98  # >98% identical data sampled three times
+    mock_prom.get_service_error_rate.assert_awaited_once_with(service="order-service", start=120.0, end=120.0)
+    assert observation["telemetry_available"] is False
+    assert observation["healthy"] is False

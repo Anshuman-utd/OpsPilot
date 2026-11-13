@@ -1,36 +1,34 @@
-import asyncio
-import contextlib
 import logging
+from uuid import uuid4
+
+from redis.exceptions import RedisError
 
 from app.core.celery_app import celery_app
 from app.core.config import get_settings
 from app.core.database import get_session_factory
 from app.core.redis import get_redis_client
 from app.services.detection.engine import DetectionEngine
+from app.workers.async_runtime import run_async_task
 
 logger = logging.getLogger("opspilot.workers.detection")
 
 LOCK_KEY = "opspilot:lock:detection_cycle"
 LOCK_TTL_SECONDS = 60
+RELEASE_LOCK = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
 
 
 async def _execute_detection_pass() -> dict:
     """Async execution helper for Celery detection task with distributed lock safety."""
     redis_client = get_redis_client()
-    lock_acquired = False
-
-    try:
-        # Acquire distributed lock with TTL to prevent concurrent or overlapping task executions
-        lock_acquired = bool(
-            await redis_client.set(LOCK_KEY, "locked", nx=True, ex=LOCK_TTL_SECONDS)
-        )
-        if not lock_acquired:
-            logger.warning(
-                "Detection cycle lock is held by another worker. Skipping overlapping task."
-            )
-            return {"status": "skipped", "reason": "lock_held"}
-    except Exception as exc:
-        logger.debug("Redis lock check bypassed (redis offline or non-blocking): %s", exc)
+    token = uuid4().hex
+    if not await redis_client.set(LOCK_KEY, token, nx=True, ex=LOCK_TTL_SECONDS):
+        logger.info("Skipping detection cycle because another worker holds the lock.")
+        return {"status": "skipped", "reason": "lock_held"}
 
     try:
         session_factory = get_session_factory()
@@ -48,9 +46,10 @@ async def _execute_detection_pass() -> dict:
                 "duration_ms": result.evaluation_duration_ms,
             }
     finally:
-        if lock_acquired:
-            with contextlib.suppress(Exception):
-                await redis_client.delete(LOCK_KEY)
+        try:
+            await redis_client.eval(RELEASE_LOCK, 1, LOCK_KEY, token)
+        except RedisError:
+            logger.warning("Could not release detection lock. It will expire.", exc_info=True)
 
 
 @celery_app.task(name="app.workers.detection_tasks.run_detection_cycle", bind=True, max_retries=3)
@@ -63,17 +62,7 @@ def run_detection_cycle(self) -> dict:
 
     logger.info("Starting scheduled incident detection cycle...")
     try:
-        return asyncio.run(_execute_detection_pass())
+        return run_async_task(_execute_detection_pass())
     except Exception as exc:
         logger.exception("Detection cycle encountered an error: %s", exc)
         raise self.retry(exc=exc, countdown=10) from exc
-
-
-# Configure periodic schedule
-settings = get_settings()
-celery_app.conf.beat_schedule = {
-    "evaluate-detection-rules-periodic": {
-        "task": "app.workers.detection_tasks.run_detection_cycle",
-        "schedule": float(settings.INCIDENT_EVALUATION_INTERVAL_SECONDS),
-    },
-}

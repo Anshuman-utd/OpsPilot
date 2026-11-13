@@ -97,7 +97,7 @@ async def handle_disable_fault_injection(
     url = f"{base_url}/debug/faults/{params.fault_type}/disable"
 
     logger.info("Executing handler: Disabling fault '%s' on %s (%s)", params.fault_type, target_service, url)
-    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+    async with httpx.AsyncClient(timeout=timeout_seconds, trust_env=False, follow_redirects=False) as client:
         resp = await client.post(url)
         resp.raise_for_status()
         data = resp.json()
@@ -122,7 +122,7 @@ async def handle_reset_all_faults(
     url = f"{base_url}/debug/faults/reset"
 
     logger.info("Executing handler: Resetting all faults on %s (%s)", target_service, url)
-    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+    async with httpx.AsyncClient(timeout=timeout_seconds, trust_env=False, follow_redirects=False) as client:
         resp = await client.post(url)
         resp.raise_for_status()
         data = resp.json()
@@ -141,20 +141,16 @@ async def handle_reset_db_pool(
     parameters: dict[str, Any],
     timeout_seconds: float = 15.0,
 ) -> dict[str, Any]:
-    """Execute database connection pool release/reset on target microservice."""
+    """Disable simulated database pool exhaustion."""
     base_url = _get_service_base_url(target_service)
     # The demo microservice holds pool connections via the db_pool_exhaustion fault
     url = f"{base_url}/debug/faults/db_pool_exhaustion/disable"
 
     logger.info("Executing handler: Releasing DB pool connections on %s (%s)", target_service, url)
-    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+    async with httpx.AsyncClient(timeout=timeout_seconds, trust_env=False, follow_redirects=False) as client:
         resp = await client.post(url)
-        # Even if fault was already disabled, 200 or 404 is handled gracefully
-        if resp.status_code == 404:
-            data = {"status": "already_disabled"}
-        else:
-            resp.raise_for_status()
-            data = resp.json()
+        resp.raise_for_status()
+        data = resp.json()
 
     return {
         "success": True,
@@ -170,18 +166,16 @@ async def handle_restore_config(
     parameters: dict[str, Any],
     timeout_seconds: float = 10.0,
 ) -> dict[str, Any]:
-    """Execute restoration of service configuration defaults."""
+    """Disable simulated downstream latency."""
     params = RestoreConfigParameters.model_validate(parameters)
     base_url = _get_service_base_url(target_service)
     # Clear latency/timeout faults
     url = f"{base_url}/debug/faults/downstream_latency_spike/disable"
 
-    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-        try:
-            resp = await client.post(url)
-            data = resp.json() if resp.status_code == 200 else {"status": "ok"}
-        except Exception as exc:
-            data = {"note": str(exc)}
+    async with httpx.AsyncClient(timeout=timeout_seconds, trust_env=False, follow_redirects=False) as client:
+        resp = await client.post(url)
+        resp.raise_for_status()
+        data = resp.json()
 
     return {
         "success": True,
@@ -189,7 +183,7 @@ async def handle_restore_config(
         "target_service": target_service,
         "config_type": params.config_type,
         "response": data,
-        "message": f"Restored default configuration for {target_service}",
+        "message": f"Disabled simulated downstream latency on {target_service}",
     }
 
 
@@ -268,8 +262,8 @@ class ActionRegistry:
         self.register(
             ActionDefinition(
                 action_type="reset_db_connection_pool",
-                name="Reset Database Connection Pool",
-                description="Releases active blocked connections and restores connection pool capacity.",
+                name="Disable Simulated Database Pool Exhaustion",
+                description="Disables the demo fault that holds database connections.",
                 supported_services={"order-service", "payment-service"},
                 supported_environments=ALLOWLISTED_ENVIRONMENTS,
                 parameters_schema=ResetDbPoolParameters,
@@ -286,8 +280,8 @@ class ActionRegistry:
         self.register(
             ActionDefinition(
                 action_type="restore_service_default_config",
-                name="Restore Service Default Configuration",
-                description="Resets service parameters and connection timeouts back to default values.",
+                name="Disable Simulated Downstream Latency",
+                description="Disables the demo fault that delays downstream requests.",
                 supported_services=ALLOWLISTED_SERVICES,
                 supported_environments=ALLOWLISTED_ENVIRONMENTS,
                 parameters_schema=RestoreConfigParameters,

@@ -26,6 +26,7 @@ async def sqlite_session():
     session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with session_factory() as session:
         yield session
+    await engine.dispose()
 
 
 @pytest.mark.asyncio

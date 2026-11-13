@@ -1,5 +1,7 @@
 from functools import lru_cache
+from urllib.parse import urlsplit
 
+from pydantic import Field, SecretStr, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,6 +15,10 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     HOST: str = "0.0.0.0"
     PORT: int = 8000
+    AUTH_REQUIRED: bool = False
+    PUBLIC_ORIGIN: str = "http://localhost:3000"
+    SESSION_HOURS: int = Field(default=12, ge=1, le=168)
+    DEMO_ORDERS_ENABLED: bool = False
 
     # PostgreSQL async connection URL
     DATABASE_URL: str = "postgresql+asyncpg://opspilot:opspilot_dev@localhost:5433/opspilot"
@@ -65,10 +71,12 @@ class Settings(BaseSettings):
 
     # Phase 5: Controlled Remediation & Recovery Settings
     REMEDIATION_ENABLED: bool = True
+    REMEDIATION_OPERATOR_ID: str = Field(default="local-operator", min_length=1, max_length=100)
+    REMEDIATION_OPERATOR_TOKEN: SecretStr | None = None
     REMEDIATION_APPROVAL_EXPIRY_MINUTES: int = 30
     REMEDIATION_EXECUTION_TIMEOUT_SECONDS: float = 30.0
-    REMEDIATION_VERIFICATION_INTERVAL_SECONDS: int = 5
-    REMEDIATION_VERIFICATION_TIMEOUT_SECONDS: int = 120
+    REMEDIATION_VERIFICATION_INTERVAL_SECONDS: int = Field(default=10, gt=0)
+    REMEDIATION_VERIFICATION_TIMEOUT_SECONDS: int = Field(default=180, gt=0)
     REMEDIATION_CONSECUTIVE_HEALTHY_REQUIRED: int = 3
     REMEDIATION_MAX_CONCURRENT_EXECUTIONS: int = 2
 
@@ -76,6 +84,53 @@ class Settings(BaseSettings):
     ORDER_SERVICE_URL: str = "http://localhost:8002"
     PAYMENT_SERVICE_URL: str = "http://localhost:8003"
     API_GATEWAY_URL: str = "http://localhost:8001"
+
+    @property
+    def auth_required(self) -> bool:
+        return self.AUTH_REQUIRED or self.APP_ENV == "production"
+
+    @property
+    def secure_session_cookie(self) -> bool:
+        return self.APP_ENV == "production" or self.PUBLIC_ORIGIN.startswith("https://")
+
+    @field_validator("PUBLIC_ORIGIN")
+    @classmethod
+    def validate_public_origin(cls, value: str, info: ValidationInfo) -> str:
+        url = urlsplit(value)
+        if (
+            url.scheme not in {"http", "https"}
+            or not url.hostname
+            or url.username is not None
+            or url.path not in {"", "/"}
+            or url.query
+            or url.fragment
+        ):
+            raise ValueError("PUBLIC_ORIGIN must be an HTTP origin without a path or credentials")
+        if info.data["APP_ENV"] == "production" and url.scheme != "https":
+            raise ValueError("PUBLIC_ORIGIN must use HTTPS in production")
+        return value.rstrip("/")
+
+    @field_validator("ORDER_SERVICE_URL", "PAYMENT_SERVICE_URL", "API_GATEWAY_URL")
+    @classmethod
+    def validate_demo_service_url(cls, value: str, info: ValidationInfo) -> str:
+        service_hosts = {
+            "ORDER_SERVICE_URL": "order-service",
+            "PAYMENT_SERVICE_URL": "payment-service",
+            "API_GATEWAY_URL": "api-gateway",
+        }
+        url = urlsplit(value)
+        if (
+            url.scheme not in {"http", "https"}
+            or url.hostname not in {"localhost", "127.0.0.1", "::1", service_hosts[info.field_name]}
+            or url.username is not None
+            or url.password is not None
+            or url.path not in {"", "/"}
+            or url.query
+            or url.fragment
+            or url.port is None
+        ):
+            raise ValueError("Expected a loopback or matching demo-service HTTP origin with an explicit port")
+        return value.rstrip("/")
 
     model_config = SettingsConfigDict(
         env_file=".env",

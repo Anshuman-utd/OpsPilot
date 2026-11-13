@@ -4,6 +4,7 @@ import json
 import logging
 from typing import Any
 
+from app.core.config import get_settings
 from app.investigation.prompts import RCA_SYNTHESIZER_PROMPT
 from app.investigation.providers import BaseLLMProvider, get_llm_provider
 from app.investigation.state import (
@@ -186,7 +187,11 @@ async def run_rca_agent(
 
     # Try LLM synthesis if available
     try:
-        llm = provider or get_llm_provider()
+        model_name = state.get("model_name")
+        settings = get_settings()
+        if model_name:
+            settings = settings.model_copy(update={"LLM_MODEL": model_name})
+        llm = provider or get_llm_provider(settings)
 
         # Structured serialization of untrusted telemetry to prevent prompt injection breakouts
         telemetry_envelope = {
@@ -227,7 +232,7 @@ async def run_rca_agent(
             {"role": "user", "content": user_content},
         ]
 
-        report = await llm.generate_structured(messages=messages, schema=FinalRCAReport)
+        report = await llm.invoke_structured(schema=FinalRCAReport, messages=messages)
         logger.info("LLM RCA synthesizer successfully generated report for %s", service)
         _sanitize_report_recommendations(report)
 

@@ -17,6 +17,11 @@ from app.investigation.tools.prometheus_tools import (
 from app.investigation.tools.tempo_tools import SpanSummary, TraceDetailResult
 
 
+@pytest.fixture(autouse=True)
+def isolate_compiled_graph(monkeypatch):
+    monkeypatch.setattr("app.investigation.graph._compiled_graph", None)
+
+
 @pytest.mark.asyncio
 async def test_investigation_graph_compilation():
     """Verify graph compiles without syntax or topology errors."""
@@ -148,7 +153,7 @@ async def test_full_investigation_workflow_execution():
             new_callable=AsyncMock,
         ) as m_trace,
         patch(
-            "app.investigation.agents.historical_agent.run_historical_agent", new_callable=AsyncMock
+            "app.investigation.graph.run_historical_agent", new_callable=AsyncMock
         ) as m_hist,
     ):
         m_err.return_value = mock_metric_res
@@ -236,7 +241,7 @@ async def test_investigation_fault_resilience_on_telemetry_outage():
             side_effect=RuntimeError("Tempo connection timeout"),
         ),
         patch(
-            "app.investigation.agents.historical_agent.run_historical_agent", new_callable=AsyncMock
+            "app.investigation.graph.run_historical_agent", new_callable=AsyncMock
         ) as m_hist,
     ):
         m_hist.return_value = {

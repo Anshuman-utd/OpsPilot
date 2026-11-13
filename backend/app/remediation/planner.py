@@ -255,7 +255,7 @@ class RemediationPlanner:
                 {"role": "user", "content": user_content},
             ]
 
-            proposal = await llm.generate_structured(messages=messages, schema=RemediationPlanProposal)
+            proposal = await llm.invoke_structured(schema=RemediationPlanProposal, messages=messages)
             logger.info("LLM formulated remediation plan for incident %s", incident.id)
 
         except Exception as exc:

@@ -1,5 +1,6 @@
 """Controlled Remediation Execution Engine with distributed locking, safety re-validation, and audit logging."""
 
+import asyncio
 import logging
 import time
 from datetime import UTC, datetime
@@ -10,6 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
 from app.core.database import get_session_factory
+from app.models.incident import IncidentModel
 from app.remediation.distributed_lock import (
     LostLockError,
     RedisUnavailableError,
@@ -51,21 +53,24 @@ class RemediationExecutor:
         self,
         execution_id: str,
         session_factory: Any = None,
+        *,
+        fail_if_locked: bool = False,
     ) -> dict[str, Any]:
         """Execute an approved remediation action with safety revalidation and locking."""
         factory = session_factory or get_session_factory()
 
-        # 1. Fetch execution record and relationships
-        async with factory() as db:
-            stmt = (
-                select(RemediationExecutionModel)
-                .options(
-                    selectinload(RemediationExecutionModel.action),
-                    selectinload(RemediationExecutionModel.plan),
-                    selectinload(RemediationExecutionModel.approval),
-                )
-                .where(RemediationExecutionModel.id == execution_id)
+        stmt = (
+            select(RemediationExecutionModel)
+            .join(RemediationExecutionModel.plan)
+            .options(
+                selectinload(RemediationExecutionModel.action),
+                selectinload(RemediationExecutionModel.plan),
+                selectinload(RemediationExecutionModel.approval),
             )
+            .where(RemediationExecutionModel.id == execution_id)
+        )
+        claim_stmt = stmt.with_for_update(of=(RemediationPlanModel, RemediationExecutionModel))
+        async with factory() as db:
             execution = (await db.execute(stmt)).scalar_one_or_none()
             if not execution:
                 logger.error("Remediation execution '%s' not found", execution_id)
@@ -73,7 +78,6 @@ class RemediationExecutor:
 
             action = execution.action
             plan = execution.plan
-            approval = execution.approval
 
             # 2. Duplicate Execution Protection
             if execution.status != ExecutionStatus.PENDING.value:
@@ -87,38 +91,6 @@ class RemediationExecutor:
                     "execution_status": execution.status,
                     "message": "Action has already executed or is currently in progress",
                 }
-
-            # 3. Pre-flight Safety Policy Re-evaluation
-            readiness = self.policy.evaluate_execution_readiness(
-                action=action,
-                plan=plan,
-                approval=approval,
-                has_already_executed=False,
-            )
-            if not readiness.is_allowed:
-                logger.error(
-                    "Safety Policy blocked execution '%s': %s",
-                    execution_id,
-                    readiness.failure_reasons,
-                )
-                execution.status = ExecutionStatus.FAILED.value
-                execution.error_message = f"Safety Policy rejection: {'; '.join(readiness.failure_reasons)}"
-                action.status = ActionStatus.FAILED.value
-                plan.status = PlanStatus.FAILED.value
-
-                audit = RemediationAuditEventModel(
-                    incident_id=plan.incident_id,
-                    investigation_id=plan.investigation_id,
-                    plan_id=plan.id,
-                    action_id=action.id,
-                    execution_id=execution.id,
-                    event_type=RemediationAuditEventType.EXECUTION_FAILED.value,
-                    actor="executor",
-                    details={"reasons": readiness.failure_reasons},
-                )
-                db.add(audit)
-                await db.commit()
-                return {"status": "policy_rejected", "reasons": readiness.failure_reasons}
 
         # 4. Acquire Distributed Lock for Target Service
         try:
@@ -142,8 +114,9 @@ class RemediationExecutor:
             async with factory() as db:
                 stmt = select(RemediationExecutionModel).where(RemediationExecutionModel.id == execution_id)
                 e_rec = (await db.execute(stmt)).scalar_one_or_none()
-                if e_rec:
+                if e_rec and e_rec.status == ExecutionStatus.PENDING.value:
                     e_rec.status = ExecutionStatus.FAILED.value
+                    e_rec.completed_at = datetime.now(UTC)
                     e_rec.error_message = f"Redis lock infrastructure failure: {exc}"
                     audit = RemediationAuditEventModel(
                         incident_id=plan.incident_id,
@@ -165,6 +138,27 @@ class RemediationExecutor:
             }
 
         if not locked:
+            message = f"Service '{action.target_service}' is currently locked by another operation"
+            if fail_if_locked:
+                async with factory() as db:
+                    pending = (await db.execute(claim_stmt)).scalar_one()
+                    if pending.status == ExecutionStatus.PENDING.value:
+                        pending.status = ExecutionStatus.FAILED.value
+                        pending.completed_at = datetime.now(UTC)
+                        pending.error_message = message
+                        if pending.plan.status == PlanStatus.APPROVED.value:
+                            pending.action.status = ActionStatus.FAILED.value
+                            pending.plan.status = PlanStatus.FAILED.value
+                        db.add(RemediationAuditEventModel(
+                            incident_id=pending.plan.incident_id,
+                            plan_id=pending.plan_id,
+                            action_id=pending.action_id,
+                            execution_id=pending.id,
+                            event_type=RemediationAuditEventType.EXECUTION_FAILED.value,
+                            actor="executor",
+                            details={"stage": "lock_contention", "error": message},
+                        ))
+                        await db.commit()
             logger.warning(
                 "Could not acquire lock for service '%s'; action '%s' is locked due to contention",
                 action.target_service,
@@ -172,7 +166,7 @@ class RemediationExecutor:
             )
             return {
                 "status": "locked",
-                "message": f"Service '{action.target_service}' is currently locked by another operation",
+                "message": message,
             }
 
         start_time = time.time()
@@ -181,18 +175,67 @@ class RemediationExecutor:
         try:
             # 5. Transition to EXECUTING status
             async with factory() as db:
-                stmt = select(RemediationExecutionModel).where(RemediationExecutionModel.id == execution_id)
-                e_record = (await db.execute(stmt)).scalar_one()
-                e_record.status = ExecutionStatus.EXECUTING.value
-                e_record.started_at = start_dt
+                execution = (await db.execute(claim_stmt)).scalar_one()
+                if execution.status != ExecutionStatus.PENDING.value:
+                    return {"status": "duplicate_prevented", "execution_status": execution.status}
 
-                act_stmt = select(RemediationActionModel).where(RemediationActionModel.id == action.id)
-                act_record = (await db.execute(act_stmt)).scalar_one()
-                act_record.status = ActionStatus.EXECUTING.value
+                action = execution.action
+                plan = execution.plan
+                if action.target_service != lock.service_name:
+                    execution.status = ExecutionStatus.FAILED.value
+                    execution.completed_at = start_dt
+                    execution.error_message = "The target service changed before execution."
+                    await db.commit()
+                    return {"status": "policy_rejected", "reasons": [execution.error_message]}
+                if (
+                    not self.settings.REMEDIATION_ENABLED
+                    or action.status != ActionStatus.APPROVED.value
+                    or plan.status != PlanStatus.APPROVED.value
+                ):
+                    execution.status = ExecutionStatus.FAILED.value
+                    execution.completed_at = start_dt
+                    execution.error_message = "Remediation is disabled or the action is no longer approved."
+                    await db.commit()
+                    return {"status": "policy_rejected", "reasons": [execution.error_message]}
 
-                plan_stmt = select(RemediationPlanModel).where(RemediationPlanModel.id == plan.id)
-                plan_record = (await db.execute(plan_stmt)).scalar_one()
-                plan_record.status = PlanStatus.EXECUTING.value
+                # 3. Pre-flight Safety Policy Re-evaluation
+                readiness = self.policy.evaluate_execution_readiness(
+                    action=action,
+                    plan=plan,
+                    approval=execution.approval,
+                    incident=await db.get(IncidentModel, plan.incident_id),
+                    has_already_executed=False,
+                )
+                if not readiness.is_allowed:
+                    logger.error(
+                        "Safety Policy blocked execution '%s': %s",
+                        execution_id,
+                        readiness.failure_reasons,
+                    )
+                    execution.status = ExecutionStatus.FAILED.value
+                    execution.completed_at = start_dt
+                    execution.error_message = f"Safety Policy rejection: {'; '.join(readiness.failure_reasons)}"
+                    action.status = ActionStatus.FAILED.value
+                    plan.status = PlanStatus.FAILED.value
+
+                    audit = RemediationAuditEventModel(
+                        incident_id=plan.incident_id,
+                        investigation_id=plan.investigation_id,
+                        plan_id=plan.id,
+                        action_id=action.id,
+                        execution_id=execution.id,
+                        event_type=RemediationAuditEventType.EXECUTION_FAILED.value,
+                        actor="executor",
+                        details={"reasons": readiness.failure_reasons},
+                    )
+                    db.add(audit)
+                    await db.commit()
+                    return {"status": "policy_rejected", "reasons": readiness.failure_reasons}
+
+                execution.status = ExecutionStatus.EXECUTING.value
+                execution.started_at = start_dt
+                action.status = ActionStatus.EXECUTING.value
+                plan.status = PlanStatus.EXECUTING.value
 
                 audit = RemediationAuditEventModel(
                     incident_id=plan.incident_id,
@@ -231,11 +274,12 @@ class RemediationExecutor:
                 handler_timeout,
             )
 
-            execution_output = await action_def.handler(
-                action.target_service,
-                action.parameters,
-                handler_timeout,
-            )
+            async with asyncio.timeout(handler_timeout):
+                execution_output = await action_def.handler(
+                    action.target_service,
+                    action.parameters,
+                    handler_timeout,
+                )
 
             # 7. Execution Succeeded -> Transition to VERIFYING
             duration_ms = (time.time() - start_time) * 1000.0

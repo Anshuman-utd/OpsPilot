@@ -1,6 +1,5 @@
 """Celery background tasks for asynchronous autonomous incident investigation."""
 
-import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -20,6 +19,7 @@ from app.investigation.models import (
 )
 from app.investigation.state import InvestigationState
 from app.models.incident import IncidentModel
+from app.workers.async_runtime import run_async_task
 
 logger = logging.getLogger("opspilot.workers.investigation")
 
@@ -51,12 +51,16 @@ async def _execute_investigation(
                 selectinload(InvestigationModel.agent_runs),
             )
             .where(InvestigationModel.id == investigation_id)
+            .with_for_update()
         )
         investigation = (await session.execute(stmt)).scalar_one_or_none()
 
         if not investigation:
             logger.error("Investigation '%s' not found for execution", investigation_id)
             return {"status": "error", "error": f"Investigation {investigation_id} not found"}
+
+        if investigation.status != InvestigationStatus.PENDING.value:
+            return {"status": "skipped", "investigation_status": investigation.status}
 
         incident: IncidentModel = investigation.incident
         if not incident:
@@ -90,6 +94,7 @@ async def _execute_investigation(
         # Build initial investigation state
         initial_state: InvestigationState = {
             "investigation_id": str(investigation.id),
+            "model_name": investigation.model_name,
             "incident_id": str(incident.id),
             "affected_service": incident.service_name,
             "incident_severity": incident.severity,
@@ -137,7 +142,7 @@ async def _execute_investigation(
         inv = (await session.execute(stmt)).scalar_one()
 
         completed_at = datetime.now(UTC)
-        duration_ms = (completed_at - (inv.started_at or now)).total_seconds() * 1000.0
+        duration_ms = (completed_at - now).total_seconds() * 1000.0
 
         final_rep = final_state.get("final_report", {})
         inv.status = final_state.get("investigation_status", InvestigationStatus.COMPLETED.value)
@@ -171,7 +176,7 @@ async def _execute_investigation(
             run_rec.status = agent_statuses.get(ag_name, AgentStatus.COMPLETED.value)
             run_rec.findings = agent_findings_map.get(ag_name)
             run_rec.error_message = agent_errors.get(ag_name)
-            run_rec.duration_ms = duration_ms / len(AGENT_NAMES)
+            run_rec.duration_ms = None
             run_rec.completed_at = completed_at
 
         await session.commit()
@@ -194,12 +199,13 @@ async def _execute_investigation(
     name="app.workers.investigation_tasks.run_investigation_task",
     bind=True,
     max_retries=1,
+    time_limit=300,
 )
 def run_investigation_task(self, investigation_id: str) -> dict[str, Any]:
     """Celery task running autonomous investigation in background."""
     logger.info("Celery task picked up investigation '%s'", investigation_id)
     try:
-        return asyncio.run(_execute_investigation(investigation_id))
+        return run_async_task(_execute_investigation(investigation_id))
     except Exception as exc:
         logger.exception("Investigation Celery task failed: %s", exc)
         raise self.retry(exc=exc, countdown=5) from exc

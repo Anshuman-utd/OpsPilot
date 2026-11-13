@@ -52,6 +52,7 @@ async def test_executor_successful_action_execution():
         plan_id=plan_id,
         action_id=action_id,
         decision=ApprovalDecision.APPROVED.value,
+        action_content_hash=action.approval_digest(),
         plan_version=1,
         expires_at=now + timedelta(minutes=30),
     )
@@ -161,6 +162,7 @@ async def test_executor_handles_handler_failure_cleanly():
         plan_id=plan_id,
         action_id=action_id,
         decision=ApprovalDecision.APPROVED.value,
+        action_content_hash=action.approval_digest(),
         plan_version=1,
         expires_at=now + timedelta(minutes=30),
     )
