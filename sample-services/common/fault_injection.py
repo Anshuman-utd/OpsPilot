@@ -200,9 +200,16 @@ def create_fault_router() -> APIRouter:
             raise HTTPException(status_code=404, detail=str(err)) from err
 
     @router.post("/{fault_name}/disable", response_model=FaultInfo)
-    async def disable_fault(fault_name: str) -> FaultInfo:
+    async def disable_fault(fault_name: str, expected_run_id: str | None = None) -> FaultInfo:
         """Disable a specific fault scenario immediately."""
         verify_enabled()
+        if expected_run_id is not None and (
+            not fault_manager.is_active(fault_name)
+            or fault_manager.get_params(fault_name).get("run_id") != expected_run_id
+        ):
+            raise HTTPException(
+                status_code=409, detail="The reviewed demo fault is no longer active."
+            )
         try:
             return fault_manager.disable(fault_name)
         except KeyError as err:

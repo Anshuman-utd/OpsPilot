@@ -1,17 +1,21 @@
 """Remediation Service managing plan creation, approval workflows, and audit trails."""
 
+import json
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import httpx
 from fastapi import HTTPException, status
+from redis.exceptions import RedisError
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
+from app.core.redis import get_redis_client
 from app.investigation.models import InvestigationModel
-from app.models.incident import IncidentModel
+from app.models.incident import IncidentModel, IncidentStatus
 from app.remediation.models import (
     ActionStatus,
     ApprovalDecision,
@@ -24,13 +28,19 @@ from app.remediation.models import (
     RemediationExecutionModel,
     RemediationPlanModel,
 )
-from app.remediation.planner import RemediationPlanner, remediation_planner
+from app.remediation.planner import (
+    RemediationPlanner,
+    _deterministic_heuristic_planner,
+    remediation_planner,
+)
 from app.remediation.policy import SafetyPolicyEngine, safety_policy_engine
 from app.remediation.schemas import (
+    ProposedActionSchema,
     RemediationApprovalRequest,
     RemediationPlanCreateRequest,
     RemediationRejectionRequest,
 )
+from app.services.demo import DEMO_STATUS, SCENARIO_RECOVERY, SCENARIOS
 
 logger = logging.getLogger("opspilot.remediation.service")
 
@@ -65,6 +75,8 @@ class RemediationService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Incident '{incident_id}' not found.",
             )
+        if incident.status == IncidentStatus.RESOLVED:
+            raise HTTPException(status_code=409, detail="This incident is already resolved.")
 
         # 2. Fetch associated investigation if provided or find latest
         investigation_id = request.investigation_id if request else None
@@ -89,11 +101,20 @@ class RemediationService:
         evidence_sources = final_report.get("evidence_sources", [])
 
         # 3. Formulate plan proposal via planner
-        proposal = await self.planner.plan(
-            incident=incident,
-            final_report=final_report,
-            evidence_refs=evidence_sources,
-        )
+        if self.settings.demo_lab_enabled:
+            demo_action = await self.demo_action_for(incident)
+            proposal = _deterministic_heuristic_planner(incident, final_report, evidence_sources)
+            proposal.proposed_actions = [demo_action] if demo_action else []
+            if demo_action:
+                proposal.summary = "Disable the active lab fault, then verify recovery against Prometheus."
+            else:
+                proposal.summary = "No active lab fault matches this incident. Review the evidence for manual follow-up."
+        else:
+            proposal = await self.planner.plan(
+                incident=incident,
+                final_report=final_report,
+                evidence_refs=evidence_sources,
+            )
 
         now = datetime.now(UTC)
         expiry_minutes = self.settings.REMEDIATION_APPROVAL_EXPIRY_MINUTES
@@ -190,6 +211,52 @@ class RemediationService:
         # Re-query with eager loading
         return await self.get_plan(plan_id, db)
 
+    async def demo_action_for(self, incident: IncidentModel) -> ProposedActionSchema | None:
+        """Use confirmed lab state for incidents observed on the faulted service."""
+        try:
+            raw = await get_redis_client().get(DEMO_STATUS)
+            run = json.loads(raw) if raw else {}
+            scenario_id = run.get("scenario")
+            scenario = SCENARIOS.get(scenario_id)
+            started_at = run.get("fault_started_at")
+            triggered_at = incident.triggered_at
+            if triggered_at.tzinfo is None:
+                triggered_at = triggered_at.replace(tzinfo=UTC)
+            if (
+                not scenario or not started_at or run.get("status") != "running"
+                or scenario.service != incident.service_name
+                or incident.incident_type not in scenario.signals
+                or triggered_at.timestamp() < started_at
+            ):
+                return None
+            base_url = {
+                "order-service": self.settings.ORDER_SERVICE_URL,
+                "payment-service": self.settings.PAYMENT_SERVICE_URL,
+            }[scenario.service]
+            async with httpx.AsyncClient(timeout=3, trust_env=False) as client:
+                response = await client.get(f"{base_url}/debug/faults")
+                response.raise_for_status()
+                active = any(
+                    item["name"] == scenario_id and item["enabled"]
+                    and item["params"].get("run_id") == run["job"]
+                    for item in response.json()
+                )
+            if not active:
+                return None
+        except (RedisError, httpx.HTTPError, ValueError):
+            logger.warning("Could not confirm the active demo scenario for remediation.", exc_info=True)
+            return None
+
+        metric, threshold = SCENARIO_RECOVERY[scenario_id]
+        return ProposedActionSchema(
+            action_type="disable_fault_injection",
+            target_service=scenario.service,
+            parameters={"fault_type": scenario_id, "run_id": run["job"]},
+            rationale=f"Confirmed active lab fault: {scenario.label}.",
+            expected_outcome="The target stays reachable and the recovery metric returns below its threshold.",
+            verification_conditions={"metric": metric, "threshold": threshold, "consecutive_cycles": 3},
+        )
+
     async def get_plan(
         self, plan_id: str, db: AsyncSession, *, for_update: bool = False
     ) -> RemediationPlanModel:
@@ -271,6 +338,9 @@ class RemediationService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Action '{action_id}' not found on plan '{plan_id}'.",
             )
+
+        if approval_req.action_content_hash and approval_req.action_content_hash != action.approval_digest():
+            raise HTTPException(status_code=409, detail="This action changed. Refresh the plan and review it again.")
 
         if action.status == ActionStatus.APPROVED.value:
             # Idempotent return if already approved
@@ -359,6 +429,7 @@ class RemediationService:
                 "comment": approval_req.comment,
                 "plan_version": plan.version,
                 "action_content_hash": approval.action_content_hash,
+                "action_snapshot": action.approval_snapshot(),
                 "expires_at": approval.expires_at.isoformat(),
             },
             created_at=now,
@@ -478,6 +549,11 @@ class RemediationService:
 
         plan.status = PlanStatus.CANCELLED.value
         plan.updated_at = now
+        for execution in plan.executions:
+            if execution.status == ExecutionStatus.PENDING.value:
+                execution.status = ExecutionStatus.FAILED.value
+                execution.completed_at = now
+                execution.error_message = "Plan cancelled before dispatch."
         for act in plan.actions:
             if act.status in (ActionStatus.PROPOSED.value, ActionStatus.PENDING_APPROVAL.value, ActionStatus.APPROVED.value):
                 act.status = ActionStatus.CANCELLED.value

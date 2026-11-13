@@ -20,6 +20,7 @@ from common.metrics import (
     PAYMENTS_PROCESSED_TOTAL,
     PrometheusMiddleware,
     metrics_endpoint,
+    record_pool_metrics,
 )
 from common.schemas import PaymentCreateRequest, PaymentResponse, ServiceHealthResponse
 from common.telemetry import setup_telemetry
@@ -57,6 +58,7 @@ def create_app() -> FastAPI:
 
     @app.get("/metrics", include_in_schema=False)
     async def metrics():
+        record_pool_metrics(SERVICE_NAME)
         return metrics_endpoint()
 
     @app.get("/health", response_model=ServiceHealthResponse, tags=["Health"])

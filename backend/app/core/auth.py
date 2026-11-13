@@ -1,16 +1,18 @@
 """Password hashing and authorization for the OpsPilot workspace."""
 
+import re
+from datetime import UTC, datetime, timedelta
 from hashlib import scrypt, sha256
-from secrets import compare_digest, token_bytes
+from secrets import compare_digest, token_bytes, token_urlsafe
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.database import get_db_session
-from app.models.account import Account, AccountSession
+from app.models.account import Account, AccountInvite, AccountSession
 
 COOKIE_NAME = "opspilot_session"
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -70,3 +72,20 @@ async def authorize_workspace(
     if request.method not in SAFE_METHODS and account.role != "operator":
         raise HTTPException(status_code=403, detail="Operator access is required.")
     return account
+
+
+def normalize_username(value: str) -> str:
+    username = value.strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._@-]{0,63}", username):
+        raise ValueError("Use letters, digits, periods, underscores, @, or hyphens for your username.")
+    return username
+
+
+async def create_invite(db: AsyncSession, role: str, actor: str) -> tuple[str, datetime]:
+    token = token_urlsafe(32)
+    now = datetime.now(UTC)
+    expires = now + timedelta(hours=24)
+    await db.execute(delete(AccountInvite).where(AccountInvite.expires_at <= now))
+    db.add(AccountInvite(token_hash=session_hash(token), role=role, created_by=actor, expires_at=expires))
+    await db.commit()
+    return token, expires

@@ -112,6 +112,14 @@ class PrometheusMiddleware(BaseHTTPMiddleware):
             ).observe(duration)
 
 
+def record_pool_metrics(service_name: str) -> None:
+    from common.database import get_demo_engine
+
+    pool = get_demo_engine().pool
+    DB_POOL_SIZE.labels(service=service_name).set(pool.size())
+    DB_POOL_CHECKED_OUT.labels(service=service_name).set(pool.checkedout())
+
+
 def metrics_endpoint() -> Response:
     """Expose Prometheus formatted metrics."""
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)

@@ -104,6 +104,8 @@ async def approve_remediation_action(
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> RemediationApprovalResponse:
     """Explicitly approve an allowlisted action, scheduling its asynchronous controlled execution."""
+    if get_settings().auth_required and not request.action_content_hash:
+        raise HTTPException(status_code=422, detail="Review the current action before approving it.")
     approval, _execution = await service.approve_action(
         plan_id, action_id, request.model_copy(update={"approver_id": operator}), db
     )

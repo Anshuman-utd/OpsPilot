@@ -225,10 +225,13 @@ class RemediationActionModel(Base):
         cascade="all, delete-orphan",
     )
 
+    @property
+    def content_hash(self) -> str:
+        return self.approval_digest()
 
-    def approval_digest(self) -> str:
-        """Bind an approval to the operation and its recovery criteria."""
-        content = {
+    def approval_snapshot(self) -> dict[str, Any]:
+        """Return the action content presented for operator review."""
+        return {
             "id": self.id,
             "plan_id": self.plan_id,
             "action_type": self.action_type,
@@ -238,7 +241,9 @@ class RemediationActionModel(Base):
             "preconditions": self.preconditions or {},
             "verification_conditions": self.verification_conditions or {},
         }
-        canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+    def approval_digest(self) -> str:
+        canonical = json.dumps(self.approval_snapshot(), sort_keys=True, separators=(",", ":"), allow_nan=False)
         return hashlib.sha256(canonical.encode()).hexdigest()
 
 

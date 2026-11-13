@@ -24,3 +24,13 @@ class AccountSession(Base):
         ForeignKey("accounts.username", ondelete="CASCADE"), index=True
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class AccountInvite(Base):
+    __tablename__ = "account_invites"
+    __table_args__ = (CheckConstraint("role IN ('operator', 'viewer')", name="ck_account_invites_role"),)
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    role: Mapped[str] = mapped_column(String(16))
+    created_by: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)

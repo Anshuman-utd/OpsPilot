@@ -6,8 +6,10 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.auth import router as auth_router
+from app.api.demo import router as demo_router
 from app.api.health import router as health_router
 from app.api.incidents import router as incidents_router
+from app.api.reports import router as reports_router
 from app.api.services import router as services_router
 from app.core.auth import authorize_workspace
 from app.core.config import get_settings
@@ -81,6 +83,8 @@ def create_application() -> FastAPI:
     application.include_router(investigations_router, dependencies=protected)
     application.include_router(remediation_router, dependencies=protected)
     application.include_router(services_router, dependencies=protected)
+    application.include_router(demo_router, dependencies=protected)
+    application.include_router(reports_router, dependencies=protected)
 
     @application.get(
         "/",

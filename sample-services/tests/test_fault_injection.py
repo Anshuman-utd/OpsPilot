@@ -58,7 +58,7 @@ async def test_enable_and_disable_fault(fault_client: AsyncClient):
         # Enable fault
         enable_resp = await fault_client.post(
             "/debug/faults/downstream_latency_spike/enable",
-            json={"duration_seconds": 30, "params": {"delay_seconds": 3.5}},
+            json={"duration_seconds": 30, "params": {"delay_seconds": 3.5, "run_id": "active-run"}},
         )
         assert enable_resp.status_code == 200
         data = enable_resp.json()
@@ -66,8 +66,16 @@ async def test_enable_and_disable_fault(fault_client: AsyncClient):
         assert data["params"]["delay_seconds"] == 3.5
         assert fault_manager.is_active("downstream_latency_spike") is True
 
-        # Disable fault
-        disable_resp = await fault_client.post("/debug/faults/downstream_latency_spike/disable")
+        stale = await fault_client.post(
+            "/debug/faults/downstream_latency_spike/disable", params={"expected_run_id": "old-run"}
+        )
+        assert stale.status_code == 409
+        assert fault_manager.is_active("downstream_latency_spike") is True
+
+        disable_resp = await fault_client.post(
+            "/debug/faults/downstream_latency_spike/disable",
+            params={"expected_run_id": "active-run"},
+        )
         assert disable_resp.status_code == 200
         assert disable_resp.json()["enabled"] is False
         assert fault_manager.is_active("downstream_latency_spike") is False

@@ -39,6 +39,7 @@ class DisableFaultParameters(BaseModel):
     fault_type: str = Field(
         description="Type of fault scenario to disable",
     )
+    run_id: str | None = Field(default=None, pattern="^[a-f0-9]{32}$")
 
     def validate_fault_type(self) -> None:
         if self.fault_type not in ALLOWLISTED_FAULT_TYPES:
@@ -98,7 +99,10 @@ async def handle_disable_fault_injection(
 
     logger.info("Executing handler: Disabling fault '%s' on %s (%s)", params.fault_type, target_service, url)
     async with httpx.AsyncClient(timeout=timeout_seconds, trust_env=False, follow_redirects=False) as client:
-        resp = await client.post(url)
+        if params.run_id:
+            resp = await client.post(url, params={"expected_run_id": params.run_id})
+        else:
+            resp = await client.post(url)
         resp.raise_for_status()
         data = resp.json()
 

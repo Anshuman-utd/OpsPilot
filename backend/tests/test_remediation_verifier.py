@@ -4,8 +4,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.core.config import Settings
 from app.investigation.tools.prometheus_tools import MetricInvestigationResult, MetricSeriesData
 from app.remediation.verifier import RecoveryVerificationEngine
+from app.services.prometheus import PrometheusQueryResult, PrometheusSample
 
 
 @pytest.mark.asyncio
@@ -120,3 +122,25 @@ async def test_evaluate_observation_db_pool_saturation():
     assert obs["telemetry_available"] is True
     assert obs["healthy"] is True
     assert obs["observed_value"] == 35.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("samples", "telemetry_available", "healthy"),
+    [([], False, False), ([0.0], True, False), ([1.0], True, True)],
+)
+async def test_recovery_requires_healthy_target(samples, telemetry_available, healthy):
+    tool = AsyncMock()
+    tool.get_service_error_rate.return_value = MetricInvestigationResult(
+        tool_name="get_service_error_rate", service="order-service", query="test", success=True,
+        series=[MetricSeriesData(labels={}, points=[], latest_value=0.01)],
+    )
+    tool.client.query_instant.return_value = PrometheusQueryResult(
+        success=True, query="up", samples=[PrometheusSample(labels={}, value=value) for value in samples],
+    )
+    verifier = RecoveryVerificationEngine(prometheus_tool=tool)
+    verifier.settings = Settings(AUTH_REQUIRED=True)
+    observation = await verifier.evaluate_observation("order-service", {"metric": "http_error_rate"})
+
+    assert observation["telemetry_available"] is telemetry_available
+    assert observation["healthy"] is healthy
