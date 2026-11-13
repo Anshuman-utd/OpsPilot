@@ -1,0 +1,43 @@
+name: Benchmark demo scenarios
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  scenario:
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    strategy:
+      fail-fast: false
+      matrix:
+        fault:
+          - payment_failure_spike
+          - downstream_latency_spike
+          - db_pool_exhaustion
+          - order_service_error_spike
+          - payment_service_unavailability
+          - cascading_timeout
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start a fresh demo
+        run: |
+          ./deploy/init-env.sh local
+          docker compose --env-file .env.preview -p opspilot-bench -f docker-compose.yml -f compose.release.yml up -d --build --wait --wait-timeout 180
+      - name: Benchmark
+        shell: bash
+        env:
+          FAULT: ${{ matrix.fault }}
+        run: |
+          docker compose --env-file .env.preview -p opspilot-bench -f docker-compose.yml -f compose.release.yml \
+            exec -T api python - "$FAULT" < deploy/benchmark.py | tee benchmark.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-${{ matrix.fault }}
+          path: benchmark.json
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose --env-file .env.preview -p opspilot-bench -f docker-compose.yml -f compose.release.yml logs --tail=80
+      - name: Remove disposable stack
+        if: always()
+        run: docker compose --env-file .env.preview -p opspilot-bench -f docker-compose.yml -f compose.release.yml down -v
