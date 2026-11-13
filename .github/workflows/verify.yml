@@ -1,0 +1,66 @@
+name: Verify OpsPilot
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.26"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Backend
+        working-directory: backend
+        run: |
+          uv run --locked --extra dev ruff check .
+          uv run --locked --extra dev pytest
+      - name: Demo services
+        working-directory: sample-services
+        run: |
+          uv run --locked --extra dev ruff check .
+          uv run --locked --extra dev pytest
+      - name: Web workspace
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run lint
+          npm run build
+  release-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure disposable release
+        run: |
+          umask 077
+          {
+            printf '%s\n' 'OPSPILOT_ENV=development' 'OPSPILOT_ORIGIN=http://localhost:8088'
+            printf '%s\n' 'EDGE_SITE_ADDRESS=http://localhost' 'EDGE_HTTP_BIND=127.0.0.1:8088'
+            printf '%s\n' 'EDGE_HTTPS_BIND=127.0.0.1:8448' 'FAULT_INJECTION_ENABLED=true'
+            for variable in POSTGRES_PASSWORD DEMO_POSTGRES_PASSWORD GRAFANA_PASSWORD; do
+              printf '%s=%s\n' "$variable" "$(openssl rand -hex 24)"
+            done
+          } > .env.ci
+      - name: Build and start release
+        run: docker compose --env-file .env.ci -p opspilot-ci -f docker-compose.yml -f compose.release.yml up -d --build --wait --wait-timeout 180
+      - name: Check migration drift
+        run: docker compose --env-file .env.ci -p opspilot-ci -f docker-compose.yml -f compose.release.yml exec -T api alembic check
+      - name: Run incident and recovery smoke test
+        run: docker compose --env-file .env.ci -p opspilot-ci -f docker-compose.yml -f compose.release.yml exec -T api python - < deploy/smoke.py
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose --env-file .env.ci -p opspilot-ci -f docker-compose.yml -f compose.release.yml logs --tail=80
+      - name: Remove disposable release
+        if: always()
+        run: docker compose --env-file .env.ci -p opspilot-ci -f docker-compose.yml -f compose.release.yml down -v
