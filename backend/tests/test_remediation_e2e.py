@@ -401,18 +401,16 @@ async def test_scenario_d_duplicate_and_concurrent_execution_prevention(sqlite_s
             db=sqlite_session,
         )
 
-    # Attempting to approve the SAME action again must fail with 400 Bad Request
-    with (
-        patch("app.workers.remediation_tasks.run_remediation_execution_task.delay"),
-        pytest.raises(Exception) as exc_info,
-    ):
-        await service.approve_action(
+    # Repeated approval returns the original execution without enqueuing a second task.
+    with patch("app.workers.remediation_tasks.run_remediation_execution_task.delay") as enqueue:
+        _, repeated = await service.approve_action(
             plan_id=plan.id,
             action_id=action.id,
             approval_req=RemediationApprovalRequest(approver_id="dan-sre", comment="Duplicate approval attempt"),
             db=sqlite_session,
         )
-    assert "already has an active approval" in str(exc_info.value) or "400" in str(exc_info.value)
+        assert repeated.id == execution.id
+        enqueue.assert_not_called()
 
     engine = sqlite_session.bind
     session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)

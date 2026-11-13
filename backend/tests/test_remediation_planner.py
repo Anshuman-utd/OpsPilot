@@ -99,7 +99,7 @@ async def test_heuristic_planner_db_pool_exhaustion():
 async def test_planner_converts_invalid_actions_to_manual_recommendations(sample_incident, sample_rca_report):
     mock_llm = AsyncMock()
     # Simulate LLM proposing an unregistered action (e.g. bash script execution)
-    mock_llm.generate_structured.return_value = RemediationPlanProposal(
+    mock_llm.invoke_structured.return_value = RemediationPlanProposal(
         summary="Plan with hallucinated command",
         root_cause_hypothesis=sample_rca_report["hypotheses"][0],
         supporting_evidence_ids=["EV-METRIC-01"],

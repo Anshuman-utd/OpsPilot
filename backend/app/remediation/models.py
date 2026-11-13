@@ -1,5 +1,7 @@
 """SQLAlchemy ORM models for Phase 5: Controlled Remediation & Recovery Verification."""
 
+import hashlib
+import json
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -224,6 +226,22 @@ class RemediationActionModel(Base):
     )
 
 
+    def approval_digest(self) -> str:
+        """Bind an approval to the operation and its recovery criteria."""
+        content = {
+            "id": self.id,
+            "plan_id": self.plan_id,
+            "action_type": self.action_type,
+            "target_service": self.target_service,
+            "environment": self.environment,
+            "parameters": self.parameters,
+            "preconditions": self.preconditions or {},
+            "verification_conditions": self.verification_conditions or {},
+        }
+        canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 class RemediationApprovalModel(Base):
     """Auditable record of explicit human approval or rejection of an action."""
 
@@ -246,6 +264,7 @@ class RemediationApprovalModel(Base):
     approver_id: Mapped[str] = mapped_column(String(100), nullable=False, default="operator")
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     plan_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    action_content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     decided_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

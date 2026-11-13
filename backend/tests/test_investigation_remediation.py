@@ -168,7 +168,7 @@ async def test_rca_agent_prompt_injection_resistance():
 
     mock_llm = AsyncMock()
     # Simulate an LLM that might echo or attempt an unsafe command
-    mock_llm.generate_structured.return_value = FinalRCAReport(
+    mock_llm.invoke_structured.return_value = FinalRCAReport(
         executive_summary="Normal investigation summary without leaking keys.",
         incident_description="Order service failure",
         timeline=[],
@@ -219,7 +219,7 @@ async def test_rca_agent_prompt_injection_resistance():
     res = await run_rca_agent(state, provider=mock_llm)
 
     # 1. Assert structured JSON was sent to the LLM (not raw concatenation)
-    called_messages = mock_llm.generate_structured.call_args[1]["messages"]
+    called_messages = mock_llm.invoke_structured.call_args[1]["messages"]
     user_msg = called_messages[1]["content"]
     assert "UNTRUSTED_TELEMETRY_DATA" in user_msg
     assert "```json" in user_msg

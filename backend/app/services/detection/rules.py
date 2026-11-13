@@ -78,11 +78,9 @@ class HighHttp5xxErrorRateRule(BaseDetectionRule):
         if not self.enabled:
             return [], []
 
-        query = (
-            'sum by (service) (rate(http_requests_total{status_code=~"5.."}[5m])) '
-            "/ clamp_min(sum by (service) (rate(http_requests_total[5m])), 0.001)"
-        )
         volume_query = "sum by (service) (rate(http_requests_total[5m]))"
+        errors = 'sum by (service) (rate(http_requests_total{status_code=~"5.."}[5m]))'
+        query = f"(({errors}) or (0 * ({volume_query}))) / (({volume_query}) > 0)"
 
         ratio_result = await client.query_instant(query)
         if not ratio_result.success:
@@ -300,11 +298,9 @@ class PaymentFailureSpikeRule(BaseDetectionRule):
         svc = "payment-service"
         fingerprint = self.generate_fingerprint(svc)
 
-        query = (
-            '100 * sum(increase(payments_processed_total{status="FAILED"}[5m])) '
-            "/ clamp_min(sum(increase(payments_processed_total[5m])), 1)"
-        )
         sample_query = "sum(increase(payments_processed_total[5m]))"
+        failures = 'sum(increase(payments_processed_total{status="FAILED"}[5m]))'
+        query = f"100 * (({failures}) or (0 * ({sample_query}))) / (({sample_query}) > 0)"
 
         ratio_result = await client.query_instant(query)
         sample_result = await client.query_instant(sample_query)
@@ -603,11 +599,9 @@ class HighOrderFailureRateRule(BaseDetectionRule):
         svc = "order-service"
         fingerprint = self.generate_fingerprint(svc)
 
-        query = (
-            '100 * sum(increase(orders_created_total{status="PAYMENT_FAILED"}[5m])) '
-            "/ clamp_min(sum(increase(orders_created_total[5m])), 1)"
-        )
         sample_query = "sum(increase(orders_created_total[5m]))"
+        failures = 'sum(increase(orders_created_total{status="PAYMENT_FAILED"}[5m]))'
+        query = f"100 * (({failures}) or (0 * ({sample_query}))) / (({sample_query}) > 0)"
 
         ratio_result = await client.query_instant(query)
         sample_result = await client.query_instant(sample_query)

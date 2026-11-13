@@ -5,6 +5,7 @@ Missing telemetry is NEVER treated as successful recovery.
 
 import asyncio
 import logging
+import math
 import time
 import uuid
 from datetime import UTC, datetime
@@ -42,84 +43,35 @@ class RecoveryVerificationEngine:
         self,
         service_name: str,
         verification_conditions: dict[str, Any],
-        window_seconds: float = 60.0,
     ) -> dict[str, Any]:
         """Query Prometheus golden signals over the recent window to evaluate service health."""
         now = time.time()
-        start = now - window_seconds
-        end = min(now, now)  # strict current wall-clock capping
-
         target_metric = verification_conditions.get("metric", "http_error_rate")
         threshold = float(verification_conditions.get("threshold", 0.05))
-
-        healthy = False
-        telemetry_available = False
-        observed_value: float | None = None
-        details: dict[str, Any] = {}
+        observed_value = None
+        details: dict[str, Any] = {"metric": target_metric}
 
         try:
+            # A single evaluation at the current time cannot reuse older range points.
             if target_metric == "payment_failure_ratio":
-                res = await self.prometheus.get_payment_failure_ratio(start=start, end=end)
-                telemetry_available = res.success and len(res.series) > 0
-                if telemetry_available:
-                    observed_value = res.series[0].latest_value
-                    healthy = observed_value <= threshold
-                details = {
-                    "metric": "payment_failure_ratio",
-                    "query": res.query,
-                    "observed_value": observed_value,
-                    "threshold": threshold,
-                    "series_count": len(res.series),
-                }
-
-            elif target_metric == "db_pool_saturation":
-                res = await self.prometheus.get_db_pool_saturation(service=service_name, start=start, end=end)
-                telemetry_available = res.success and len(res.series) > 0
-                if telemetry_available:
-                    observed_value = res.series[0].latest_value
-                    healthy = observed_value <= threshold
-                details = {
-                    "metric": "db_pool_saturation",
-                    "query": res.query,
-                    "observed_value": observed_value,
-                    "threshold": threshold,
-                    "series_count": len(res.series),
-                }
-
-            elif target_metric == "p95_latency":
-                res = await self.prometheus.get_service_p95_latency(service=service_name, start=start, end=end)
-                telemetry_available = res.success and len(res.series) > 0
-                if telemetry_available:
-                    observed_value = res.series[0].latest_value
-                    healthy = observed_value <= threshold
-                details = {
-                    "metric": "p95_latency",
-                    "query": res.query,
-                    "observed_value": observed_value,
-                    "threshold": threshold,
-                    "series_count": len(res.series),
-                }
-
+                res = await self.prometheus.get_payment_failure_ratio(start=now, end=now)
             else:
-                # Default: HTTP error rate
-                res = await self.prometheus.get_service_error_rate(service=service_name, start=start, end=end)
-                telemetry_available = res.success and len(res.series) > 0
-                if telemetry_available:
-                    observed_value = res.series[0].latest_value
-                    healthy = observed_value <= threshold
-                details = {
-                    "metric": "http_error_rate",
-                    "query": res.query,
-                    "observed_value": observed_value,
-                    "threshold": threshold,
-                    "series_count": len(res.series),
-                }
+                query = {
+                    "db_pool_saturation": self.prometheus.get_db_pool_saturation,
+                    "p95_latency": self.prometheus.get_service_p95_latency,
+                    "http_error_rate": self.prometheus.get_service_error_rate,
+                }[target_metric]
+                res = await query(service=service_name, start=now, end=now)
 
+            if res.success and res.series and all(math.isfinite(series.latest_value) for series in res.series):
+                observed_value = max(series.latest_value for series in res.series)
+            details.update(query=res.query, series_count=len(res.series))
         except Exception as exc:
             logger.warning("Telemetry evaluation failed for %s (%s): %s", service_name, target_metric, exc)
-            telemetry_available = False
-            details = {"error": str(exc), "metric": target_metric}
+            details["error"] = str(exc)
 
+        telemetry_available = observed_value is not None
+        healthy = observed_value is not None and observed_value <= threshold
         observation = {
             "timestamp": datetime.now(UTC).isoformat(),
             "telemetry_available": telemetry_available,
@@ -134,12 +86,16 @@ class RecoveryVerificationEngine:
         self,
         execution_id: str,
         session_factory: Any = None,
-        max_iterations: int = 15,
-        poll_interval_seconds: float = 2.0,
+        max_iterations: int | None = None,
+        poll_interval_seconds: float | None = None,
     ) -> VerificationStatus:
         """Execute the multi-cycle verification loop in background worker."""
         factory = session_factory or get_session_factory()
         now = datetime.now(UTC)
+        interval = self.settings.REMEDIATION_VERIFICATION_INTERVAL_SECONDS
+        if poll_interval_seconds is not None:
+            interval = poll_interval_seconds
+        deadline = time.monotonic() + self.settings.REMEDIATION_VERIFICATION_TIMEOUT_SECONDS
 
         async with factory() as db:
             stmt = (
@@ -154,6 +110,11 @@ class RecoveryVerificationEngine:
             execution = (await db.execute(stmt)).scalar_one_or_none()
             if not execution:
                 logger.error("Execution '%s' not found for verification", execution_id)
+                return VerificationStatus.VERIFICATION_FAILED
+
+            if execution.status != ExecutionStatus.VERIFYING.value:
+                if execution.verification_runs:
+                    return VerificationStatus(execution.verification_runs[0].status)
                 return VerificationStatus.VERIFICATION_FAILED
 
             action = execution.action
@@ -174,17 +135,28 @@ class RecoveryVerificationEngine:
                     observations=[],
                 )
                 db.add(verif_run)
-                await db.flush()
+                await db.commit()
 
-        consecutive_healthy = 0
-        final_status = VerificationStatus.VERIFYING
+        consecutive_healthy = verif_run.consecutive_healthy_count
+        final_status = VerificationStatus(verif_run.status)
+        if final_status == VerificationStatus.RECOVERED:
+            max_iterations = 0
 
         # Verification polling loop
-        for iteration in range(1, max_iterations + 1):
-            obs = await self.evaluate_observation(
-                service_name=service_name,
-                verification_conditions=conds,
-            )
+        iteration = 0
+        while max_iterations is None or iteration < max_iterations:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            iteration += 1
+            try:
+                async with asyncio.timeout(remaining):
+                    obs = await self.evaluate_observation(
+                        service_name=service_name,
+                        verification_conditions=conds,
+                    )
+            except TimeoutError:
+                break
 
             async with factory() as db:
                 run_stmt = (
@@ -241,10 +213,12 @@ class RecoveryVerificationEngine:
 
                 await db.commit()
 
-            if final_status == VerificationStatus.RECOVERED:
+            if final_status == VerificationStatus.RECOVERED or iteration == max_iterations:
                 break
-
-            await asyncio.sleep(poll_interval_seconds)
+            remaining = deadline - time.monotonic()
+            if remaining <= interval:
+                break
+            await asyncio.sleep(interval)
 
         # Final state transition & audit persistence
         async with factory() as db:
@@ -256,8 +230,11 @@ class RecoveryVerificationEngine:
                     selectinload(RemediationExecutionModel.verification_runs),
                 )
                 .where(RemediationExecutionModel.id == execution_id)
+                .with_for_update()
             )
             execution = (await db.execute(exec_stmt)).scalar_one()
+            if execution.status != ExecutionStatus.VERIFYING.value:
+                return VerificationStatus(execution.verification_runs[0].status)
             action = execution.action
             plan = execution.plan
             v_record = execution.verification_runs[0]
@@ -274,6 +251,7 @@ class RecoveryVerificationEngine:
                     prev_status = inc_record.status
                     inc_record.status = IncidentStatus.RESOLVED.value
                     inc_record.resolved_at = datetime.now(UTC)
+                    inc_record.updated_at = inc_record.resolved_at
                     inc_event = IncidentEventModel(
                         id=str(uuid.uuid4()),
                         incident_id=inc_record.id,
@@ -307,6 +285,7 @@ class RecoveryVerificationEngine:
                 execution.status = ExecutionStatus.VERIFICATION_FAILED.value
                 action.status = ActionStatus.FAILED.value
                 plan.status = PlanStatus.FAILED.value
+                v_record.completed_at = datetime.now(UTC)
                 v_record.summary = "Telemetry was unavailable during verification window. Automated recovery could not be proven."
 
                 audit = RemediationAuditEventModel(
@@ -323,6 +302,8 @@ class RecoveryVerificationEngine:
 
             else:
                 # Still degraded or regression detected after timeout
+                if final_status == VerificationStatus.VERIFYING:
+                    final_status = VerificationStatus.VERIFICATION_FAILED
                 v_status = VerificationStatus.VERIFICATION_FAILED.value
                 v_record.status = v_status
                 v_record.completed_at = datetime.now(UTC)

@@ -33,7 +33,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import app.remediation.executor as executor_module
-from app.core.redis import ping_redis
+from app.core.redis import close_redis, ping_redis
 from app.remediation.distributed_lock import (
     RedisUnavailableError,
     RemediationDistributedLock,
@@ -91,6 +91,7 @@ def _build_test_records(
         plan_id=plan_id,
         action_id=action_id,
         decision=ApprovalDecision.APPROVED.value,
+        action_content_hash=action.approval_digest(),
         plan_version=1,
         expires_at=now + timedelta(minutes=30),
     )
@@ -553,30 +554,23 @@ async def test_live_redis_contention_and_expired_owner_race():
     if not is_live:
         pytest.skip(f"Live Redis server unavailable at configured REDIS_URL: {details}")
 
-    # Real live Redis client is used
-    svc = "api-gateway"
-    worker1 = RemediationDistributedLock(svc, ttl_seconds=1.0)
-    worker2 = RemediationDistributedLock(svc, ttl_seconds=5.0)
+    # Use an isolated key and simulate a paused worker by stopping renewal.
+    service = "api-gateway"
+    worker1 = RemediationDistributedLock(service, ttl_seconds=1.0)
+    worker2 = RemediationDistributedLock(service, ttl_seconds=5.0)
+    worker1.lock_key = worker2.lock_key = f"opspilot:test:remediation:{uuid.uuid4()}"
+    try:
+        assert await worker1.acquire() is True
+        assert await worker2.acquire() is False
+        await worker1._stop_renewal()
 
-    # 1. Atomic acquisition
-    acq1 = await worker1.acquire()
-    assert acq1 is True
+        async with asyncio.timeout(3):
+            while not await worker2.acquire():
+                await asyncio.sleep(0.1)
 
-    # 2. Atomic contention on real server
-    acq2 = await worker2.acquire()
-    assert acq2 is False
-
-    # 3. Wait for Worker 1 TTL to expire on real Redis
-    await asyncio.sleep(1.2)
-
-    # 4. Worker 2 can now acquire
-    acq2_retry = await worker2.acquire()
-    assert acq2_retry is True
-
-    # 5. Worker 1 late release: Lua compare-and-delete will not delete Worker 2's lock
-    rel1 = await worker1.release()
-    assert rel1 is False
-
-    # 6. Worker 2's lock is still held on real server
-    assert await worker2.validate_ownership() is True
-    await worker2.release()
+        assert await worker1.release() is False
+        assert await worker2.validate_ownership() is True
+    finally:
+        await worker1.release()
+        await worker2.release()
+        await close_redis()

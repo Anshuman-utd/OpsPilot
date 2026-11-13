@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "OpsPilot — Agentic SRE Platform",
+  title: "OpsPilot | Reliability Workspace",
   description:
-    "Autonomous AI-powered Site Reliability Engineering and incident investigation platform.",
+    "Review incidents, investigate service health, and verify recovery.",
 };
 
 export default function RootLayout({
@@ -14,7 +14,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="h-full antialiased">
-      <body className="min-h-full bg-slate-950 text-slate-100 flex flex-col font-sans">
+      <body className="min-h-full flex flex-col">
         {children}
       </body>
     </html>

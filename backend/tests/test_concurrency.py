@@ -24,7 +24,8 @@ async def sqlite_engine():
     )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    return engine
+    yield engine
+    await engine.dispose()
 
 
 @pytest.fixture

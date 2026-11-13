@@ -5,6 +5,7 @@ from app.investigation.models import (
     InvestigationStatus,
     InvestigationTriggerType,
 )
+from app.models.account import Account, AccountSession
 from app.models.incident import (
     IncidentEventModel,
     IncidentEventType,
@@ -29,6 +30,8 @@ from app.remediation.models import (
 )
 
 __all__ = [
+    "Account",
+    "AccountSession",
     "ActionStatus",
     "AgentStatus",
     "ApprovalDecision",

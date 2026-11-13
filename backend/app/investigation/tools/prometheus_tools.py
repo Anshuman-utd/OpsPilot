@@ -202,10 +202,9 @@ class PrometheusInvestigationTool:
         self, service: str, start: float, end: float, step: str = "15s"
     ) -> MetricInvestigationResult:
         """Query HTTP 5xx error rate ratio for the service over a time range."""
-        query = (
-            f'sum(rate(http_requests_total{{service="{service}", status_code=~"5.."}}[2m])) '
-            f'/ clamp_min(sum(rate(http_requests_total{{service="{service}"}}[2m])), 0.001)'
-        )
+        total = f'sum(rate(http_requests_total{{service="{service}"}}[2m]))'
+        errors = f'sum(rate(http_requests_total{{service="{service}", status_code=~"5.."}}[2m]))'
+        query = f"(({errors}) or (0 * ({total}))) / (({total}) > 0)"
         result = await self.client.query_range(query=query, start=start, end=end, step=step)
         return self._process_query_result(
             "get_service_error_rate", service, query, result, start, end
@@ -235,10 +234,9 @@ class PrometheusInvestigationTool:
         self, start: float, end: float, step: str = "15s"
     ) -> MetricInvestigationResult:
         """Query payment transaction failure percentage over a time range."""
-        query = (
-            '100 * sum(rate(payments_processed_total{status="FAILED"}[2m])) '
-            "/ clamp_min(sum(rate(payments_processed_total[2m])), 0.001)"
-        )
+        total = "sum(rate(payments_processed_total[2m]))"
+        failures = 'sum(rate(payments_processed_total{status="FAILED"}[2m]))'
+        query = f"100 * (({failures}) or (0 * ({total}))) / (({total}) > 0)"
         result = await self.client.query_range(query=query, start=start, end=end, step=step)
         return self._process_query_result(
             "get_payment_failure_ratio", "payment-service", query, result, start, end

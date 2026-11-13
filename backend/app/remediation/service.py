@@ -54,6 +54,9 @@ class RemediationService:
         request: RemediationPlanCreateRequest | None = None,
     ) -> RemediationPlanModel:
         """Formulate, policy-validate, and persist a new remediation plan for an incident."""
+        if not self.settings.REMEDIATION_ENABLED:
+            raise HTTPException(status_code=503, detail="Remediation is disabled.")
+
         # 1. Fetch incident
         stmt = select(IncidentModel).where(IncidentModel.id == incident_id)
         incident = (await db.execute(stmt)).scalar_one_or_none()
@@ -67,8 +70,13 @@ class RemediationService:
         investigation_id = request.investigation_id if request else None
         investigation: InvestigationModel | None = None
         if investigation_id:
-            inv_stmt = select(InvestigationModel).where(InvestigationModel.id == investigation_id)
+            inv_stmt = select(InvestigationModel).where(
+                InvestigationModel.id == investigation_id,
+                InvestigationModel.incident_id == incident_id,
+            )
             investigation = (await db.execute(inv_stmt)).scalar_one_or_none()
+            if investigation is None:
+                raise HTTPException(status_code=404, detail="Investigation not found for this incident.")
         else:
             inv_stmt = (
                 select(InvestigationModel)
@@ -77,7 +85,7 @@ class RemediationService:
             )
             investigation = (await db.execute(inv_stmt)).scalars().first()
 
-        final_report = investigation.final_report if investigation else {}
+        final_report = (investigation.final_report or {}) if investigation else {}
         evidence_sources = final_report.get("evidence_sources", [])
 
         # 3. Formulate plan proposal via planner
@@ -142,7 +150,7 @@ class RemediationService:
             )
 
             if not eval_res.is_allowed:
-                action.status = ActionStatus.PROPOSED.value
+                action.status = ActionStatus.REJECTED.value
 
             db.add(action)
 
@@ -182,7 +190,9 @@ class RemediationService:
         # Re-query with eager loading
         return await self.get_plan(plan_id, db)
 
-    async def get_plan(self, plan_id: str, db: AsyncSession) -> RemediationPlanModel:
+    async def get_plan(
+        self, plan_id: str, db: AsyncSession, *, for_update: bool = False
+    ) -> RemediationPlanModel:
         """Fetch remediation plan with child actions and approvals eagerly loaded."""
         stmt = (
             select(RemediationPlanModel)
@@ -193,6 +203,8 @@ class RemediationService:
             )
             .where(RemediationPlanModel.id == plan_id)
         )
+        if for_update:
+            stmt = stmt.with_for_update().execution_options(populate_existing=True)
         plan = (await db.execute(stmt)).scalar_one_or_none()
         if not plan:
             raise HTTPException(
@@ -228,7 +240,7 @@ class RemediationService:
         now = datetime.now(UTC)
 
         # 1. Fetch and validate plan
-        plan = await self.get_plan(plan_id, db)
+        plan = await self.get_plan(plan_id, db, for_update=True)
         if plan.status not in (PlanStatus.PENDING_APPROVAL.value, PlanStatus.APPROVED.value):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -267,7 +279,7 @@ class RemediationService:
             if existing_app and existing_exec:
                 return existing_app, existing_exec
 
-        if action.status not in (ActionStatus.PENDING_APPROVAL.value, ActionStatus.PROPOSED.value):
+        if action.status != ActionStatus.PENDING_APPROVAL.value:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Action '{action_id}' has status '{action.status}' and cannot be approved.",
@@ -293,6 +305,7 @@ class RemediationService:
             approver_id=approval_req.approver_id,
             comment=approval_req.comment,
             plan_version=plan.version,
+            action_content_hash=action.approval_digest(),
             expires_at=now + timedelta(minutes=expiry_minutes),
             decided_at=now,
             created_at=now,
@@ -345,6 +358,7 @@ class RemediationService:
             details={
                 "comment": approval_req.comment,
                 "plan_version": plan.version,
+                "action_content_hash": approval.action_content_hash,
                 "expires_at": approval.expires_at.isoformat(),
             },
             created_at=now,
@@ -360,7 +374,32 @@ class RemediationService:
             run_remediation_execution_task.delay(execution_id)
             logger.info("Enqueued Celery execution task for execution %s", execution_id)
         except Exception as exc:
-            logger.warning("Could not dispatch Celery execution task immediately (%s); execution is in PENDING state", exc)
+            logger.warning("Could not queue remediation execution %s: %s", execution_id, exc)
+            if self.settings.auth_required:
+                # The durable pending row will be redispatched by the reconciler.
+                return approval, execution
+            plan = await self.get_plan(plan_id, db, for_update=True)
+            execution = next(item for item in plan.executions if item.id == execution_id)
+            if execution.status == ExecutionStatus.PENDING.value:
+                execution.status = ExecutionStatus.FAILED.value
+                execution.completed_at = execution.updated_at = datetime.now(UTC)
+                execution.error_message = "Could not queue remediation. Check the worker and create a fresh plan."
+                if plan.status == PlanStatus.APPROVED.value:
+                    plan.status = PlanStatus.FAILED.value
+                    plan.updated_at = execution.updated_at
+                    next(item for item in plan.actions if item.id == action_id).status = ActionStatus.FAILED.value
+                db.add(RemediationAuditEventModel(
+                    incident_id=plan.incident_id,
+                    investigation_id=plan.investigation_id,
+                    plan_id=plan_id,
+                    action_id=action_id,
+                    execution_id=execution_id,
+                    event_type=RemediationAuditEventType.EXECUTION_FAILED.value,
+                    actor="remediation_service",
+                    details={"stage": "queue_dispatch"},
+                ))
+                await db.commit()
+                raise HTTPException(status_code=503, detail=execution.error_message) from exc
 
         return approval, execution
 
@@ -373,7 +412,9 @@ class RemediationService:
     ) -> RemediationApprovalModel:
         """Reject a proposed action and mark plan and action as REJECTED."""
         now = datetime.now(UTC)
-        plan = await self.get_plan(plan_id, db)
+        plan = await self.get_plan(plan_id, db, for_update=True)
+        if plan.status not in (PlanStatus.PENDING_APPROVAL.value, PlanStatus.APPROVED.value):
+            raise HTTPException(status_code=409, detail=f"Plan in status '{plan.status}' cannot be rejected.")
         action = next((a for a in plan.actions if a.id == action_id), None)
         if not action:
             raise HTTPException(
@@ -428,8 +469,8 @@ class RemediationService:
     ) -> RemediationPlanModel:
         """Cancel a pending remediation plan."""
         now = datetime.now(UTC)
-        plan = await self.get_plan(plan_id, db)
-        if plan.status in (PlanStatus.EXECUTING.value, PlanStatus.SUCCEEDED.value):
+        plan = await self.get_plan(plan_id, db, for_update=True)
+        if plan.status not in (PlanStatus.DRAFT.value, PlanStatus.PENDING_APPROVAL.value, PlanStatus.APPROVED.value):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Cannot cancel plan with status '{plan.status}'.",
@@ -438,7 +479,7 @@ class RemediationService:
         plan.status = PlanStatus.CANCELLED.value
         plan.updated_at = now
         for act in plan.actions:
-            if act.status in (ActionStatus.PROPOSED.value, ActionStatus.PENDING_APPROVAL.value):
+            if act.status in (ActionStatus.PROPOSED.value, ActionStatus.PENDING_APPROVAL.value, ActionStatus.APPROVED.value):
                 act.status = ActionStatus.CANCELLED.value
 
         audit = RemediationAuditEventModel(

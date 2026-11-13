@@ -22,12 +22,12 @@ export default function ApiStatusIndicator() {
   const [latency, setLatency] = useState<number | null>(null);
   const [lastChecked, setLastChecked] = useState<string | null>(null);
 
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+  const apiUrl = "";
 
   const fetchHealth = useCallback(async () => {
     const startTime = performance.now();
     try {
-      const response = await fetch(`${apiUrl}/health/ready`, {
+      const response = await fetch(`${apiUrl}/api/v1/services/platform`, {
         cache: "no-store",
       });
       const elapsed = Math.round(performance.now() - startTime);
@@ -109,7 +109,7 @@ export default function ApiStatusIndicator() {
       <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3 text-xs font-mono">
         <div className="rounded-lg bg-slate-950/60 p-3 border border-slate-800/60">
           <p className="text-slate-400">Target Endpoint</p>
-          <p className="text-slate-200 truncate mt-1">{apiUrl}</p>
+          <p className="text-slate-200 truncate mt-1">API readiness</p>
         </div>
         <div className="rounded-lg bg-slate-950/60 p-3 border border-slate-800/60">
           <p className="text-slate-400">Round-trip Latency</p>

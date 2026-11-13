@@ -38,7 +38,7 @@ class InvestigationService:
         request = request or InvestigationCreateRequest()
 
         # 1. Verify incident exists
-        stmt = select(IncidentModel).where(IncidentModel.id == incident_id)
+        stmt = select(IncidentModel).where(IncidentModel.id == incident_id).with_for_update()
         incident = (await session.execute(stmt)).scalar_one_or_none()
         if not incident:
             raise HTTPException(
@@ -56,17 +56,7 @@ class InvestigationService:
         # 3. Check LLM provider credentials
         provider = get_llm_provider(self.settings)
         if not provider.is_configured():
-            logger.warning(
-                "Investigation rejected: LLM provider '%s' has no API key.",
-                provider.get_provider_name(),
-            )
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"LLM provider '{provider.get_provider_name()}' is not configured. "
-                    "Please set GROQ_API_KEY in environment."
-                ),
-            )
+            logger.info("Using deterministic RCA because the LLM provider is unconfigured.")
 
         # 4. Check for active running investigation on this incident to prevent duplicate overlapping runs
         running_stmt = select(InvestigationModel).where(
@@ -122,9 +112,10 @@ class InvestigationService:
 
             run_investigation_task.delay(investigation.id)
         except Exception as exc:
-            logger.warning(
-                "Could not dispatch Celery task immediately (broker offline or testing): %s", exc
-            )
+            if self.settings.auth_required:
+                logger.warning("Investigation %s will be queued by reconciliation: %s", investigation.id, exc)
+                return investigation
+            await self.record_dispatch_failure(investigation, session, exc)
 
         return investigation
 
@@ -181,7 +172,7 @@ class InvestigationService:
         session: AsyncSession,
     ) -> InvestigationModel:
         """Retry a failed or cancelled investigation."""
-        stmt = select(InvestigationModel).where(InvestigationModel.id == investigation_id)
+        stmt = select(InvestigationModel).where(InvestigationModel.id == investigation_id).with_for_update()
         investigation = (await session.execute(stmt)).scalar_one_or_none()
         if not investigation:
             raise HTTPException(
@@ -213,6 +204,20 @@ class InvestigationService:
 
             run_investigation_task.delay(investigation.id)
         except Exception as exc:
-            logger.warning("Could not dispatch Celery retry task: %s", exc)
+            if self.settings.auth_required:
+                logger.warning("Investigation %s will be queued by reconciliation: %s", investigation.id, exc)
+                return investigation
+            await self.record_dispatch_failure(investigation, session, exc)
 
         return investigation
+
+    async def record_dispatch_failure(
+        self, investigation: InvestigationModel, session: AsyncSession, exc: Exception
+    ) -> None:
+        logger.warning("Investigation %s could not be queued: %s", investigation.id, exc)
+        await session.refresh(investigation, with_for_update=True)
+        if investigation.status == InvestigationStatus.PENDING.value:
+            investigation.status = InvestigationStatus.FAILED.value
+            investigation.error_message = "Could not queue investigation. Check the worker and retry."
+            investigation.completed_at = investigation.updated_at = datetime.now(UTC)
+        await session.commit()

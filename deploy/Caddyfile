@@ -1,0 +1,23 @@
+{$OPSPILOT_SITE} {
+    encode zstd gzip
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy same-origin
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        -Server
+    }
+    @workspace path /api/* /health/live
+    handle @workspace {
+        request_body {
+            max_size 64KB
+        }
+        reverse_proxy api:8000
+    }
+    handle /health/* {
+        respond 404
+    }
+    handle {
+        reverse_proxy web:3000
+    }
+}

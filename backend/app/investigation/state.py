@@ -148,6 +148,7 @@ class InvestigationState(TypedDict, total=False):
     incident_context: dict[str, Any]
     investigation_started_at: str
     investigation_status: str
+    model_name: str | None
 
     affected_service: str
     incident_severity: str

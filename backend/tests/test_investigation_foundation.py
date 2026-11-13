@@ -34,6 +34,7 @@ async def sqlite_session():
     session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with session_factory() as session:
         yield session
+    await engine.dispose()
 
 
 @pytest.fixture
@@ -55,6 +56,7 @@ async def client_with_sqlite():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client, session_factory
+    await engine.dispose()
 
 
 class TestLLMProviderAbstraction:
@@ -150,7 +152,7 @@ class TestInvestigationAPIBasics:
     """Tests for investigation REST endpoints."""
 
     @pytest.mark.asyncio
-    async def test_start_investigation_missing_credentials_returns_400(self, client_with_sqlite):
+    async def test_start_investigation_missing_credentials_queues_fallback(self, client_with_sqlite):
         client, session_factory = client_with_sqlite
 
         now = datetime.now(UTC)
@@ -171,13 +173,13 @@ class TestInvestigationAPIBasics:
             session.add(inc)
             await session.commit()
 
-        # Attempt to start investigation when GROQ_API_KEY is not configured
-        with patch("app.investigation.service.get_settings") as mock_settings:
-            mock_settings.return_value = Settings(GROQ_API_KEY=None, INVESTIGATION_ENABLED=True)
+        with (
+            patch("app.investigation.service.get_llm_provider", return_value=GroqProvider(Settings(GROQ_API_KEY=None))),
+            patch("app.workers.investigation_tasks.run_investigation_task.delay") as enqueue,
+        ):
             resp = await client.post("/api/v1/incidents/inc-api-test-01/investigations")
-            assert resp.status_code == 400
-            data = resp.json()
-            assert "LLM provider 'groq' is not configured" in data["detail"]
+            assert resp.status_code == 202
+            enqueue.assert_called_once_with(resp.json()["id"])
 
     @pytest.mark.asyncio
     async def test_start_investigation_nonexistent_incident_returns_404(self, client_with_sqlite):

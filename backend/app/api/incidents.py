@@ -7,8 +7,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.auth import require_account
 from app.core.config import get_settings
 from app.core.database import get_db_session
+from app.models.account import Account
 from app.models.incident import (
     IncidentEventModel,
     IncidentEventType,
@@ -25,6 +27,7 @@ from app.schemas.incident import (
 )
 from app.services.detection.engine import DetectionEngine
 from app.services.detection.rules import get_default_rules
+from app.workers.detection_tasks import run_detection_cycle
 
 logger = logging.getLogger("opspilot.api.incidents")
 
@@ -238,6 +241,15 @@ async def evaluate_detection_rules(
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> DetectionRunResponse:
     """Trigger an immediate deterministic incident detection cycle."""
+    if get_settings().auth_required:
+        try:
+            run_detection_cycle.apply_async(retry=False)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="The detection queue is unavailable.") from exc
+        return DetectionRunResponse(
+            status="queued", rules_evaluated=0, breaches_detected=0, incidents_created=0,
+            incidents_updated=0, incidents_resolved=0, evaluation_duration_ms=0,
+        )
     engine = DetectionEngine()
     return await engine.evaluate_all(db)
 
@@ -269,10 +281,13 @@ async def get_incident_detail(
 async def acknowledge_incident(
     incident_id: str,
     db: Annotated[AsyncSession, Depends(get_db_session)],
+    account: Annotated[Account, Depends(require_account)],
     action: IncidentActionRequest | None = None,
 ) -> IncidentDetailResponse:
     """Acknowledge an incident, recording operator identity and audit event."""
     action = action or IncidentActionRequest()
+    if get_settings().auth_required:
+        action = action.model_copy(update={"actor": account.username})
     query = (
         select(IncidentModel)
         .options(selectinload(IncidentModel.events))
@@ -321,10 +336,13 @@ async def acknowledge_incident(
 async def investigate_incident(
     incident_id: str,
     db: Annotated[AsyncSession, Depends(get_db_session)],
+    account: Annotated[Account, Depends(require_account)],
     action: IncidentActionRequest | None = None,
 ) -> IncidentDetailResponse:
     """Transition incident status to INVESTIGATING."""
     action = action or IncidentActionRequest()
+    if get_settings().auth_required:
+        action = action.model_copy(update={"actor": account.username})
     query = (
         select(IncidentModel)
         .options(selectinload(IncidentModel.events))
@@ -373,10 +391,13 @@ async def investigate_incident(
 async def resolve_incident(
     incident_id: str,
     db: Annotated[AsyncSession, Depends(get_db_session)],
+    account: Annotated[Account, Depends(require_account)],
     action: IncidentActionRequest | None = None,
 ) -> IncidentDetailResponse:
     """Manually resolve an incident."""
     action = action or IncidentActionRequest()
+    if get_settings().auth_required:
+        action = action.model_copy(update={"actor": account.username})
     query = (
         select(IncidentModel)
         .options(selectinload(IncidentModel.events))

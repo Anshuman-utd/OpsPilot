@@ -225,6 +225,7 @@ def test_policy_engine_execution_readiness_checks():
         plan_id=plan.id,
         action_id=action.id,
         decision=ApprovalDecision.APPROVED.value,
+        action_content_hash=action.approval_digest(),
         plan_version=1,
         expires_at=now - timedelta(minutes=5),  # in the past
     )
@@ -241,6 +242,7 @@ def test_policy_engine_execution_readiness_checks():
         plan_id=plan.id,
         action_id=action.id,
         decision=ApprovalDecision.APPROVED.value,
+        action_content_hash=action.approval_digest(),
         plan_version=2,  # plan version is 1
         expires_at=now + timedelta(minutes=30),
     )
@@ -258,6 +260,7 @@ def test_policy_engine_execution_readiness_checks():
         plan_id=plan.id,
         action_id=action.id,
         decision=ApprovalDecision.APPROVED.value,
+        action_content_hash=action.approval_digest(),
         plan_version=1,
         expires_at=now + timedelta(minutes=30),
     )

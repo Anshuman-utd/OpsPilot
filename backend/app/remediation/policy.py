@@ -211,6 +211,16 @@ class SafetyPolicyEngine:
             else:
                 passed.append("plan_version_matched")
 
+            if (
+                approval.plan_id != plan.id
+                or approval.action_id != action.id
+                or approval.action_content_hash != action.approval_digest()
+            ):
+                failed.append("approval_content_matched")
+                reasons.append("Approval does not match the current action content. A new approval is required.")
+            else:
+                passed.append("approval_content_matched")
+
             # 4. Approval Decision Check
             if approval.decision != "APPROVED":
                 failed.append("approval_decision_valid")
