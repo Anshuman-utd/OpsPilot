@@ -6,6 +6,12 @@ discovery.relabel "service_logs" {
   targets = discovery.docker.containers.targets
 
   rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    regex         = "opspilot"
+    action        = "keep"
+  }
+
+  rule {
     source_labels = ["__meta_docker_container_name"]
     regex         = "/opspilot-(.*)"
     target_label  = "service"

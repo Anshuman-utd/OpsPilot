@@ -1,0 +1,164 @@
+# Run with docker-compose.yml as the base. Compose 2.24.4+.
+x-backend: &backend
+  image: opspilot/backend:local
+  build: ./backend
+  restart: unless-stopped
+  environment:
+    APP_ENV: ${OPSPILOT_ENV:-production}
+    AUTH_REQUIRED: "true"
+    PUBLIC_ORIGIN: ${OPSPILOT_ORIGIN:?Set OPSPILOT_ORIGIN}
+    DEBUG: "false"
+    DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-opspilot}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-opspilot}
+    REDIS_URL: redis://redis:6379/0
+    PROMETHEUS_URL: http://prometheus:9090
+    LOKI_URL: http://loki:3100
+    TEMPO_URL: http://tempo:3200
+    GRAFANA_URL: http://grafana:3000
+    API_GATEWAY_URL: http://api-gateway:8001
+    ORDER_SERVICE_URL: http://order-service:8002
+    PAYMENT_SERVICE_URL: http://payment-service:8003
+    REMEDIATION_ENABLED: ${FAULT_INJECTION_ENABLED:-false}
+    DEMO_ORDERS_ENABLED: ${DEMO_ORDERS_ENABLED:-false}
+    GROQ_API_KEY: ${GROQ_API_KEY:-}
+  networks: [opspilot-network]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  postgres:
+    container_name: !reset null
+    ports: !reset []
+  redis:
+    container_name: !reset null
+    ports: !reset []
+  demo-postgres:
+    container_name: !reset null
+    ports: !reset []
+    environment:
+      POSTGRES_PASSWORD: ${DEMO_POSTGRES_PASSWORD:?Set DEMO_POSTGRES_PASSWORD}
+  api-gateway:
+    container_name: !reset null
+    ports: !reset []
+    environment:
+      SERVICE_LOG_DIRECTORY: /var/log/opspilot
+    volumes:
+      - service_logs:/var/log/opspilot
+  order-service:
+    container_name: !reset null
+    ports: !reset []
+    environment:
+      SERVICE_LOG_DIRECTORY: /var/log/opspilot
+    volumes:
+      - service_logs:/var/log/opspilot
+  payment-service:
+    container_name: !reset null
+    ports: !reset []
+    environment:
+      SERVICE_LOG_DIRECTORY: /var/log/opspilot
+    volumes:
+      - service_logs:/var/log/opspilot
+  prometheus:
+    container_name: !reset null
+    ports: !reset []
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--storage.tsdb.retention.time=7d"]
+  grafana:
+    container_name: !reset null
+    ports: !reset []
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?Set GRAFANA_PASSWORD}
+  loki:
+    container_name: !reset null
+    ports: !reset []
+  tempo:
+    container_name: !reset null
+    ports: !reset []
+  otel-collector:
+    container_name: !reset null
+    ports: !reset []
+  alloy:
+    container_name: !reset null
+    ports: !reset []
+    volumes: !override
+      - ./deploy/alloy.release:/etc/alloy/config.alloy:ro
+      - log_alloy:/var/lib/alloy
+      - service_logs:/var/log/opspilot:ro
+    command: ["run", "--storage.path=/var/lib/alloy", "/etc/alloy/config.alloy"]
+  migrate:
+    <<: *backend
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+  api:
+    <<: *backend
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+  worker:
+    <<: *backend
+    command: ["celery", "-A", "app.core.celery_app", "worker", "--loglevel=INFO", "--concurrency=3", "--prefetch-multiplier=1"]
+    stop_grace_period: 4m
+    depends_on:
+      api:
+        condition: service_healthy
+  beat:
+    <<: *backend
+    command: ["celery", "-A", "app.core.celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/opspilot-beat"]
+    depends_on:
+      api:
+        condition: service_healthy
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    networks: [opspilot-network]
+    depends_on:
+      api:
+        condition: service_healthy
+  edge:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    environment:
+      OPSPILOT_SITE: ${EDGE_SITE_ADDRESS:-${OPSPILOT_ORIGIN:?Set OPSPILOT_ORIGIN}}
+    ports:
+      - "${EDGE_HTTP_BIND:-80}:80"
+      - "${EDGE_HTTPS_BIND:-443}:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [opspilot-network]
+    depends_on:
+      web:
+        condition: service_started
+
+volumes:
+  postgres_data:
+    name: !reset null
+  redis_data:
+    name: !reset null
+  demo_postgres_data:
+    name: !reset null
+  prometheus_data:
+    name: !reset null
+  grafana_data:
+    name: !reset null
+  loki_data:
+    name: !reset null
+  tempo_data:
+    name: !reset null
+  caddy_data:
+  caddy_config:
+  log_alloy:
+  service_logs:
+
+networks:
+  opspilot-network:
+    name: !reset null

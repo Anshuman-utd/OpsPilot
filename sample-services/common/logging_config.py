@@ -1,7 +1,10 @@
 import json
 import logging
+import os
 import sys
 from datetime import UTC, datetime
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any
 
 from opentelemetry import trace
@@ -48,11 +51,20 @@ def configure_logging(service_name: str, log_level: str = "INFO") -> logging.Log
     """Configure the root logger to output structured JSON to stdout."""
     logger = logging.getLogger(service_name)
     logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
-    logger.handlers.clear()
+    for existing_handler in logger.handlers[:]:
+        logger.removeHandler(existing_handler)
+        existing_handler.close()
 
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter(service_name=service_name))
     logger.addHandler(handler)
+    log_directory = os.getenv("SERVICE_LOG_DIRECTORY")
+    if log_directory:
+        file_handler = RotatingFileHandler(
+            Path(log_directory) / f"{service_name}.log", maxBytes=5_000_000, backupCount=3
+        )
+        file_handler.setFormatter(JsonFormatter(service_name))
+        logger.addHandler(file_handler)
     logger.propagate = False
 
     return logger
