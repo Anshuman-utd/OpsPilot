@@ -1,5 +1,7 @@
 # OpsPilot
 
+**Run the authenticated release** with the [deployment guide](docs/DEPLOYMENT.md). The instructions below also cover host-based development.
+
 > **Agentic AI-Powered Site Reliability Engineering (SRE) Platform**
 > Autonomously investigates application incidents, identifies potential root causes, recommends verified remediation, and validates service recovery.
 
@@ -18,7 +20,7 @@ Traditional monitoring and observability stacks (Prometheus, Grafana, Datadog) n
 - **Which service is affected?** Maps service dependencies and blast radius.
 - **Why did the incident happen?** Synthesizes logs, metrics, and traces into evidence-backed root cause hypotheses.
 - **What remediation should be performed?** Proposes safe, scoped runbook actions for human review.
-- **Did the remediation work?** Verifies service recovery and issues post-incident retrospectives.
+- **Did the remediation work?** Records telemetry observations and reports the recovery outcome.
 
 ---
 
@@ -26,12 +28,9 @@ Traditional monitoring and observability stacks (Prometheus, Grafana, Datadog) n
 
 OpsPilot maintains a strict boundary between **observed facts** and **AI-generated hypotheses**. The platform never takes unverified actions against production environments and enforces Human-in-the-Loop (HITL) approval for all remediation.
 
-### Current Implementation Status
-- **Phase 1 (Foundation):** Completed & Verified.
-- **Phase 2 (Microservices & Observability):** Completed & Audited.
-- **Phase 3 (Incident Management & Deterministic Detection):** Completed & Verified.
-- **Phase 4 (LangGraph AI Agents & Root Cause Analysis):** Completed & Benchmark Validated.
-- **Phase 5 (Human-Approved Remediation & Recovery Verification):** Completed & Verified (152 total tests passing).
+### Current implementation status
+
+OpsPilot implements incident detection, LangGraph investigation, and operator-approved remediation against its three demo microservices. See the [repository audit and next steps](docs/PROJECT_AUDIT.md) for current validation evidence and deployment gaps.
 
 ```mermaid
 flowchart TD
@@ -75,9 +74,9 @@ flowchart TD
     subgraph RemediationEngine ["Controlled Remediation & Recovery Engine (Phase 5)"]
         FINAL_REPORT --> PLANNER["Remediation Planner (LLM + Fallback)"]
         PLANNER --> REGISTRY["Allowlisted Action Registry"]
-        REGISTRY --> POLICY["Deterministic Safety Policy (12 Rules)"]
+        REGISTRY --> POLICY["Deterministic Safety Policy"]
         POLICY --> APPROVAL_GATE["Mandatory Human Approval Gate"]
-        APPROVAL_GATE -->|Approved & Signed| EXEC_TASK["Celery Execution Worker"]
+        APPROVAL_GATE -->|Token-authenticated approval| EXEC_TASK["Celery Execution Worker"]
         EXEC_TASK -->|Redis Lock + Bounded HTTP| OS & PS & GW
         EXEC_TASK --> VERIF_TASK["Celery Verification Worker"]
         VERIF_TASK -->|Query Consecutive Cycles| PROM
@@ -165,7 +164,7 @@ The platform continuously evaluates 6 deterministic SRE rules against Prometheus
 
 ## 5. Autonomous Multi-Agent Investigation & RCA (Phase 4)
 
-When an incident triggers or an operator requests investigation, OpsPilot dispatches an autonomous multi-agent swarm orchestrated by **LangGraph**:
+When an operator requests an investigation, OpsPilot dispatches the **LangGraph** workflow:
 
 1. **Incident Analyzer**: Bounds time windows ($t - 15m$ to $t + 5m$) and formulates targeted investigation goals.
 2. **Metrics Investigator**: Queries Prometheus golden signals (throughput, latency, error rate, DB pool saturation).
@@ -185,12 +184,13 @@ Agents exclusively inspect telemetry and generate hypotheses. Zero operational m
 
 ### Step 1: Start All Infrastructure (Docker Compose)
 ```bash
-docker-compose up -d
+docker compose up -d --build --wait
 ```
 
 ### Step 2: Run Database Migrations
 ```bash
 cd backend
+uv sync --locked --extra dev
 uv run alembic upgrade head
 ```
 
@@ -198,18 +198,23 @@ uv run alembic upgrade head
 ```bash
 # Terminal 1: FastAPI API
 cd backend
-uv run uvicorn app.main:app --reload --port 8000
+uv run uvicorn app.main:app --host 127.0.0.1 --reload --port 8000
 
 # Terminal 2: Celery Worker
 cd backend
-uv run celery -A app.core.celery_app worker -l info -B
+uv run celery -A app.core.celery_app worker -l info
+
+# Terminal 3: Celery Beat
+cd backend
+uv run celery -A app.core.celery_app beat -l info
 ```
 Interactive API documentation is accessible at [http://localhost:8000/docs](http://localhost:8000/docs).
 
 ### Step 4: Start Frontend Web UI
 ```bash
 cd frontend
-npm run dev
+npm ci
+npm run dev -- --hostname 127.0.0.1
 ```
 Open [http://localhost:3000](http://localhost:3000) for the Incidents Dashboard.
 
@@ -218,11 +223,14 @@ Open [http://localhost:3000](http://localhost:3000) for the Incidents Dashboard.
 # Start investigation via REST API
 curl -X POST http://localhost:8000/api/v1/incidents/{incident_id}/investigations \
   -H "Content-Type: application/json" \
-  -d '{"trigger_type": "manual"}' | jq .
+  -d '{"trigger_type": "MANUAL"}' | jq .
 ```
 Or click **"Start Autonomous Investigation"** in the Next.js incident drawer.
 
-### Step 6: Propose & Authorize Controlled Remediation
+### Step 6: Propose and authorize controlled remediation
+
+For the fault simulation, start the demo containers with `FAULT_INJECTION_ENABLED=true`. Set `REMEDIATION_OPERATOR_TOKEN` in `backend/.env` to a strong secret before starting the API. You can generate one with `openssl rand -hex 32`. Set `REMEDIATION_OPERATOR_ID` to the operator name to record in the audit log. If you upgraded from an older version, create a fresh plan for any unexecuted approvals after applying the migration.
+
 ```bash
 # Propose an evidence-backed remediation plan
 curl -X POST http://localhost:8000/api/v1/incidents/{incident_id}/remediation-plans \
@@ -231,28 +239,32 @@ curl -X POST http://localhost:8000/api/v1/incidents/{incident_id}/remediation-pl
 # Approve a specific allowlisted action (Mandatory Human Operator Gate)
 curl -X POST http://localhost:8000/api/v1/remediation-plans/{plan_id}/actions/{action_id}/approve \
   -H "Content-Type: application/json" \
-  -d '{"approver_id": "operator@sre", "comment": "Approved following RCA review", "plan_version": 1}' | jq .
+  -H "Authorization: Bearer $REMEDIATION_OPERATOR_TOKEN" \
+  -d '{"comment": "Approved following RCA review", "plan_version": 1}' | jq .
 ```
-Or use the **"Remediation & Recovery"** panel in the Next.js incident drawer to review proposed actions, approve execution with confirmation, and track real-time recovery verification.
+Use the **Remediation & Recovery** panel to review the action, enter the operator token, confirm execution, and track verification. For the curl example, set the shell variable `REMEDIATION_OPERATOR_TOKEN` to the same token as the API.
 
 ---
 
 ## 7. Automated Testing & Code Quality
 
-OpsPilot features **152 passing unit, integration, and end-to-end tests** with 100% test pass rate across the full stack:
+The Python suites cover unit tests and integration tests with simulated dependencies. The backend also includes a live Redis test. Run the pipeline check separately against the running Compose stack.
 
 ```bash
-# Run Core Platform, Detection, LangGraph Investigation, & Phase 5 Remediation tests (125 tests)
+# Run backend tests
 cd backend
-uv run pytest -v
+uv run --locked --extra dev pytest -v
 
-# Run Demo Microservices & Telemetry tests (27 tests)
+# Run demo service tests
 cd ../sample-services
-uv run pytest -v
+uv run --locked --extra dev pytest -v
 
 # Code Formatting & Linting
 cd ../backend && uv run ruff check .
 cd ../frontend && npm run lint && npm run build
+
+# From sample-services, with the Compose stack running
+cd ../sample-services && uv run --locked verify_pipeline.py
 ```
 
 ---
@@ -271,6 +283,7 @@ cd ../frontend && npm run lint && npm run build
 - **Phase 4 Remediation & Reliability Report:** [`docs/PHASE_4_REMEDIATION_REPORT.md`](docs/PHASE_4_REMEDIATION_REPORT.md)
 
 ### Phase 5 Controlled Remediation & Verified Recovery
+- **Current repository audit and next steps** [PROJECT_AUDIT.md](docs/PROJECT_AUDIT.md)
 - **Phase 5 Architecture Specification:** [`docs/PHASE_5_ARCHITECTURE.md`](docs/PHASE_5_ARCHITECTURE.md)
 - **Phase 5 Implementation Guide:** [`docs/PHASE_5_IMPLEMENTATION.md`](docs/PHASE_5_IMPLEMENTATION.md)
 - **Phase 5 Security Architecture & Policy Invariants:** [`docs/PHASE_5_SECURITY.md`](docs/PHASE_5_SECURITY.md)
